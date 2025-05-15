@@ -26,84 +26,63 @@ GLIF = {
     ]
 }
 
-# ===== HEALTH MANAGEMENT =====
-service_ready = False
+# ===== WEBHOOK VERIFICATION =====
+@app.route('/', methods=['GET'])
+def verify_webhook():
+    """Endpoint for UltraMSG webhook verification"""
+    if request.args.get('token') == ULTRA_MSG['token']:
+        return request.args.get('challenge')
+    return "Invalid verification token", 403
 
-@app.route('/health')
-def health_check():
-    """Comprehensive health endpoint for Koyeb"""
-    if service_ready:
-        return jsonify({
-            'status': 'healthy',
-            'service': 'WhatsApp Thumbnail Bot',
-            'timestamp': int(time.time()),
-            'system': {
-                'python_version': sys.version,
-                'platform': sys.platform
-            }
-        }), 200
-    return jsonify({'status': 'starting'}), 503
-
-@app.route('/')
-def ready_check():
-    """Root endpoint for basic health checks"""
-    return jsonify({
-        'status': 'ready' if service_ready else 'starting',
-        'service': 'WhatsApp Thumbnail Generator',
-        'endpoints': {
-            'health': '/health',
-            'webhook': 'POST /'
-        }
-    }), 200 if service_ready else 503
-
-# ===== CORE FUNCTIONALITY =====
+# ===== MESSAGE PROCESSING =====
 @app.route('/', methods=['POST'])
-def webhook_handler():
-    """Main UltraMSG webhook processor"""
+def handle_message():
+    """Process incoming WhatsApp messages"""
     try:
-        if not service_ready:
-            return jsonify({'error': 'Service initializing'}), 503
-
         data = request.json
         if not data:
             return jsonify({'error': 'No data received'}), 400
 
-        # Process UltraMSG webhook format
-        if data.get('event_type') == 'message_received':
-            msg = data.get('data', {})
-            phone = msg.get('from', '').split('@')[0]
-            text = msg.get('body', '').strip().lower()
+        # Verify the message is from UltraMSG
+        if data.get('token') != ULTRA_MSG['token']:
+            return jsonify({'error': 'Invalid token'}), 403
+
+        # Process message_received events
+        if data.get('event') == 'message_received':
+            message = data.get('data', {})
+            phone = message.get('from', '').replace('@c.us', '')
+            text = message.get('body', '').strip().lower()
 
             if not text:
                 return jsonify({'error': 'Empty message'}), 400
 
             # Command processing
             if text in ['hi', 'hello', 'hey']:
-                return send_response(phone, "👋 Hi! Send me a video topic to generate a thumbnail!")
+                return send_whatsapp_message(phone, "👋 Hi! Send me a video topic to generate a thumbnail!")
 
             if text in ['help', 'info']:
-                return send_response(phone, "ℹ️ Send me a topic (e.g. 'cooking tutorial') and I'll create a thumbnail!")
+                return send_whatsapp_message(phone, "ℹ️ Send me a topic (e.g. 'cooking tutorial') and I'll create a thumbnail!")
 
             if len(text) > 3:
-                send_response(phone, "🔄 Generating thumbnail... (20-30 seconds)")
+                send_whatsapp_message(phone, "🔄 Generating thumbnail... (20-30 seconds)")
                 
                 for token in GLIF['tokens']:
                     image_url = generate_thumbnail(text, token)
                     if image_url:
-                        send_image(phone, image_url, f"🎨 Thumbnail for: {text}")
-                        send_response(phone, f"🔗 Direct URL: {image_url}")
+                        send_whatsapp_image(phone, image_url, f"🎨 Thumbnail for: {text}")
+                        send_whatsapp_message(phone, f"🔗 Direct URL: {image_url}")
                         return jsonify({'success': True})
 
-                return send_response(phone, "❌ All generation attempts failed. Try different keywords.")
+                return send_whatsapp_message(phone, "❌ All generation attempts failed. Try different keywords.")
 
         return jsonify({'status': 'ignored'}), 200
 
     except Exception as e:
-        print(f"ERROR: {str(e)}", flush=True)
-        return jsonify({'error': str(e)}), 500
+        print(f"ERROR: {str(e)}", file=sys.stderr)
+        return jsonify({'error': 'Internal server error'}), 500
 
 # ===== SERVICE FUNCTIONS =====
-def send_response(phone, text, retries=3):
+def send_whatsapp_message(phone, text, retries=3):
     """Send WhatsApp message with retry logic"""
     for attempt in range(retries):
         try:
@@ -118,11 +97,11 @@ def send_response(phone, text, retries=3):
             )
             return jsonify(response.json())
         except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {str(e)}", flush=True)
+            print(f"Message send attempt {attempt + 1} failed: {str(e)}", file=sys.stderr)
             time.sleep(2)
     return jsonify({'error': 'Failed to send message'}), 500
 
-def send_image(phone, url, caption, retries=3):
+def send_whatsapp_image(phone, url, caption, retries=3):
     """Send WhatsApp image with retry logic"""
     for attempt in range(retries):
         try:
@@ -138,7 +117,7 @@ def send_image(phone, url, caption, retries=3):
             )
             return response.json()
         except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {str(e)}", flush=True)
+            print(f"Image send attempt {attempt + 1} failed: {str(e)}", file=sys.stderr)
             time.sleep(2)
     return None
 
@@ -161,37 +140,30 @@ def generate_thumbnail(prompt, token, max_length=100):
             if key in data and isinstance(data[key], str) and data[key].startswith('http'):
                 return data[key]
         
-        print(f"Unexpected GLIF response: {data}", flush=True)
+        print(f"Unexpected GLIF response: {data}", file=sys.stderr)
         return None
         
     except Exception as e:
-        print(f"GLIF API error: {str(e)}", flush=True)
+        print(f"GLIF API error: {str(e)}", file=sys.stderr)
         return None
 
-# ===== SERVER MANAGEMENT =====
+# ===== SERVER SETUP =====
 def run_server():
     """Start production server"""
-    global service_ready
-    print("Starting production server on port 8000", flush=True)
+    print("Starting production server on port 8000", file=sys.stderr)
     serve(app, host="0.0.0.0", port=8000)
-    service_ready = True
 
 if __name__ == '__main__':
     print("""
     WhatsApp Thumbnail Generator Service
     Initializing at {}...
-    """.format(time.ctime()), flush=True)
+    """.format(time.ctime()), file=sys.stderr)
 
     # Start server in background
     server_thread = threading.Thread(target=run_server)
     server_thread.daemon = True
     server_thread.start()
 
-    # Mark service as ready after initialization
-    time.sleep(2)  # Allow server to start
-    service_ready = True
-    print("Service is now ready", flush=True)
-
     # Keep main thread alive
     while True:
-        time.sleep(3600)
+        time.sleep(1)

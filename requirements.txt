@@ -1,5 +1,2 @@
-python-telegram-bot
-   google-auth-oauthlib
-   google-auth
-   google-api-python-client
-   python-dotenv
+flask
+   requests

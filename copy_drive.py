@@ -1,15 +1,16 @@
 from flask import Flask, request, jsonify
 import requests
 import time
+from waitress import serve  # Production-grade WSGI server
 
 app = Flask(__name__)
 
-# UltraMSG Configuration - HARDCODED
+# UltraMSG Configuration (HARDCODED VALUES)
 INSTANCE_ID = "instance116714"
 TOKEN = "j0253a3npbpb7ikw"
 BASE_URL = f"https://api.ultramsg.com/{INSTANCE_ID}"
 
-# GLIF Configuration - HARDCODED
+# GLIF Configuration (HARDCODED VALUES)
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
 API_TOKENS = [
     "glif_a4ef6d3aa5d8575ea8448b29e293919a42a6869143fcbfc32f2e4a7dbe53199a",
@@ -20,96 +21,121 @@ API_TOKENS = [
     "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
 ]
 
-@app.route('/', methods=['GET', 'POST'])
+@app.route('/', methods=['POST'])
 def webhook():
     try:
-        print("\nIncoming request detected")
+        print("\nIncoming WhatsApp webhook request")
         
         if not request.json:
+            print("Empty request received")
             return jsonify({'status': 'error', 'message': 'No data received'}), 400
         
         data = request.json
+        print(f"Processing message: {data}")
+
+        # UltraMSG message format handling
         if data.get('event_type') == 'message_received':
             msg_data = data.get('data', {})
-            phone = msg_data.get('from', '').split('@')[0]
+            phone = msg_data.get('from', '').split('@')[0]  # Remove @c.us suffix
             message = msg_data.get('body', '').strip().lower()
             
             # Command router
+            if not message:
+                return jsonify({'status': 'error', 'message': 'Empty message'}), 400
+                
             if message in ['hi', 'hello', 'hey']:
-                return respond(phone, "👋 Hi! Send me any video topic to generate a thumbnail!")
+                return process_response(phone, "👋 Hi! Send me any video topic to generate a thumbnail!")
                 
             elif message in ['help', 'info']:
-                return respond(phone, "ℹ️ Just send me a topic (e.g. 'cooking tutorial') and I'll create a thumbnail!")
+                return process_response(phone, "ℹ️ Just send me a topic (e.g. 'cooking tutorial') and I'll create a thumbnail!")
                 
             elif len(message) > 3:
-                respond(phone, "🔄 Generating your thumbnail... (20-30 seconds)")
+                process_response(phone, "🔄 Generating your thumbnail... (20-30 seconds)")
                 
+                # Try all GLIF tokens until success
                 for token in API_TOKENS:
-                    image_url = generate_image(message, token)
+                    image_url = generate_thumbnail(message, token)
                     if image_url:
-                        send_image(phone, image_url, f"🎨 Thumbnail for: {message}")
-                        respond(phone, f"🔗 Direct URL: {image_url}")
+                        send_whatsapp_image(phone, image_url, f"🎨 Thumbnail for: {message}")
+                        process_response(phone, f"🔗 Direct URL: {image_url}")
                         return jsonify({'status': 'success'})
                 
-                respond(phone, "❌ All generation attempts failed. Try different keywords.")
-                return jsonify({'status': 'error'})
-        
-        return jsonify({'status': 'ignored'})
+                # All tokens failed
+                return process_response(phone, "❌ All generation attempts failed. Try different keywords.")
+            
+            return jsonify({'status': 'ignored'})
+            
+        return jsonify({'status': 'unhandled_event'})
     
     except Exception as e:
-        print(f"CRASH: {str(e)}")
+        print(f"CRITICAL ERROR: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-def respond(phone, text):
-    """UltraMSG message sender with brute-force retry"""
-    for _ in range(3):
+def process_response(phone, text):
+    """Handle WhatsApp text response with retry logic"""
+    print(f"Sending message to {phone}: {text}")
+    for attempt in range(3):
         try:
             response = requests.post(
                 f"{BASE_URL}/messages/chat",
                 data={'token': TOKEN, 'to': phone, 'body': text},
                 timeout=10
             )
-            return response.json()
-        except:
+            return jsonify(response.json())
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {str(e)}")
             time.sleep(2)
-    return None
+    return jsonify({'status': 'error', 'message': 'Failed to send response'})
 
-def send_image(phone, url, caption):
-    """UltraMSG image sender with brute-force retry"""
-    for _ in range(3):
+def send_whatsapp_image(phone, image_url, caption):
+    """Send image through WhatsApp with retry logic"""
+    print(f"Sending image to {phone}: {image_url}")
+    for attempt in range(3):
         try:
             response = requests.post(
                 f"{BASE_URL}/messages/image",
-                data={'token': TOKEN, 'to': phone, 'image': url, 'caption': caption},
+                data={
+                    'token': TOKEN,
+                    'to': phone,
+                    'image': image_url,
+                    'caption': caption
+                },
                 timeout=20
             )
             return response.json()
-        except:
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {str(e)}")
             time.sleep(2)
     return None
 
-def generate_image(prompt, token):
-    """GLIF API caller with aggressive error handling"""
+def generate_thumbnail(prompt, token):
+    """Generate thumbnail using GLIF API"""
+    print(f"Generating thumbnail for: {prompt}")
     try:
         response = requests.post(
             f"https://simple-api.glif.app/{GLIF_ID}",
             headers={"Authorization": f"Bearer {token}"},
-            json={"prompt": prompt[:100], "style": "youtube_trending"},
+            json={
+                "prompt": prompt[:100],  # Truncate to 100 chars
+                "style": "youtube_trending"
+            },
             timeout=30
         )
-        
-        # Parse every possible response format
         data = response.json()
+        
+        # Check multiple possible response formats
         for key in ["output", "image_url", "url"]:
             if key in data and isinstance(data[key], str) and data[key].startswith('http'):
+                print(f"Successfully generated image: {data[key]}")
                 return data[key]
-                
-        print(f"Strange GLIF response: {data}")
+        
+        print(f"Unexpected GLIF response format: {data}")
         return None
         
     except Exception as e:
-        print(f"GLIF explosion: {str(e)}")
+        print(f"GLIF API error: {str(e)}")
         return None
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)  # Koyeb's default port
+    print("Starting WhatsApp Thumbnail Bot Server")
+    serve(app, host="0.0.0.0", port=8000)  # Production server on Koyeb's expected port

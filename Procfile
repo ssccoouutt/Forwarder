@@ -1,1 +1,1 @@
-worker: python copy_drive.py
+web: python copy_drive.py

@@ -8,7 +8,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration - TRIPLE-CHECK THESE VALUES
+# Configuration - VERIFY THESE VALUES
 ULTRA_MSG_TOKEN = "j0253a3npbpb7ikw"
 INSTANCE_ID = "instance116714"
 BASE_URL = f"https://api.ultramsg.com/{INSTANCE_ID}"
@@ -20,12 +20,11 @@ def health_check():
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     try:
-        # 1. First log EVERYTHING about the incoming request
+        # 1. Log incoming request details
         logger.info(f"\n{'='*50}\nINCOMING REQUEST:\n"
                    f"Method: {request.method}\n"
                    f"Headers: {dict(request.headers)}\n"
                    f"Args: {request.args}\n"
-                   f"Data: {request.data}\n"
                    f"JSON: {request.json}\n"
                    f"{'='*50}")
 
@@ -38,77 +37,58 @@ def webhook():
 
         # 3. Process message
         data = request.json
-        if data.get('event') == 'message_received':
+        if data and data.get('event') == 'message_received':
             msg = data['data']
-            phone = msg['from'].split('@')[0]  # 923190779215
+            phone = msg['from'].split('@')[0]
             text = msg.get('body', '').strip()
             
-            logger.info(f"Preparing to reply to {phone}...")
+            logger.info(f"Processing message from {phone}: {text}")
 
-            # 4. TEST: Try sending to YOUR personal number first
+            # 4. Try sending reply (TEST WITH YOUR NUMBER)
             test_phone = "923190779215"  # <<< CHANGE TO YOUR NUMBER
-            test_message = f"🚨 TEST REPLY to {phone} for message: {text}"
+            test_message = f"🔔 Bot reply to: {text}"
             
-            # 5. DEBUG: Try THREE different sending methods
-            send_results = {
-                "method1": send_via_ultramsg_api(test_phone, test_message),
-                "method2": send_via_requests_direct(test_phone, test_message),
-                "method3": send_via_curl_command(test_phone, test_message)
-            }
-            
-            logger.info(f"SEND RESULTS:\n{send_results}")
-            
-            return jsonify({"status": "processed", "results": send_results})
+            # Method 1: Standard API call
+            api_result = send_message(test_phone, test_message)
+            logger.info(f"API RESULT: {api_result}")
+
+            return jsonify({
+                "status": "processed",
+                "reply_attempted": True,
+                "api_result": api_result
+            })
 
         return jsonify({"status": "ignored"})
 
     except Exception as e:
-        logger.error(f"CRITICAL ERROR: {str(e)}")
+        logger.error(f"ERROR: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-def send_via_ultramsg_api(phone, text):
-    """Method 1: Standard UltraMSG API"""
+def send_message(phone, text):
+    """Send message with thorough error handling"""
     try:
+        start_time = time.time()
         response = requests.post(
             f"{BASE_URL}/messages/chat",
-            data={'token': ULTRA_MSG_TOKEN, 'to': phone, 'body': text},
+            data={
+                'token': ULTRA_MSG_TOKEN,
+                'to': phone,
+                'body': text
+            },
             timeout=10
         )
-        return {
-            "status": response.status_code,
+        response_data = {
+            "status_code": response.status_code,
             "response": response.text,
+            "time_taken": f"{time.time()-start_time:.2f}s",
             "success": response.json().get('sent', False)
         }
+        logger.info(f"MESSAGE API RESPONSE: {response_data}")
+        return response_data
     except Exception as e:
+        logger.error(f"SEND ERROR: {str(e)}")
         return {"error": str(e)}
-
-def send_via_requests_direct(phone, text):
-    """Method 2: Direct request with debug"""
-    try:
-        response = requests.post(
-            "https://api.ultramsg.com/instance116714/messages/chat",
-            data={'token': ULTRA_MSG_TOKEN, 'to': phone, 'body': text},
-            timeout=10
-        )
-        return {
-            "url": response.url,
-            "status": response.status_code,
-            "headers": dict(response.headers),
-            "response": response.text
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-def send_via_curl_command(phone, text):
-    """Method 3: Returns curl command you can run manually"""
-    return {
-        "curl_command": f"""curl -X POST \\
-        "https://api.ultramsg.com/instance116714/messages/chat" \\
-        -d "token=j0253a3npbpb7ikw" \\
-        -d "to={phone}" \\
-        -d "body={text.replace(' ', '+')}""""
-    }
 
 if __name__ == '__main__':
-    logger.info("🚀 STARTING DEBUG BOT - WILL LOG EVERYTHING 🚀")
+    logger.info("🚀 WhatsApp Bot Started - Ready for Messages")
     serve(app, host='0.0.0.0', port=8000)

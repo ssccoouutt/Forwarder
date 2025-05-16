@@ -2,19 +2,16 @@ from flask import Flask, request, jsonify
 from waitress import serve
 import requests
 import logging
+import time
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration
-CONFIG = {
-    "ultramsg": {
-        "token": "j0253a3npbpb7ikw",
-        "instance_id": "instance116714",
-        "base_url": "https://api.ultramsg.com/instance116714"
-    }
-}
+# UltraMSG Configuration
+ULTRA_MSG_TOKEN = "j0253a3npbpb7ikw"
+INSTANCE_ID = "instance116714"
+BASE_URL = f"https://api.ultramsg.com/{INSTANCE_ID}"
 
 @app.route('/')
 def health_check():
@@ -22,54 +19,62 @@ def health_check():
 
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
-    # Verification challenge
-    if request.method == 'GET':
-        token = request.args.get('token')
-        if token == CONFIG['ultramsg']['token']:
-            logger.info("Verification successful")
-            return request.args.get('challenge', '')
-        logger.warning(f"Invalid token received: {token}")
-        return "Invalid token", 403
-    
-    # Process messages
-    data = request.json
-    logger.info(f"Incoming message data: {data}")
-    
-    if data and data.get('event') == 'message_received':
-        msg = data.get('data', {})
-        phone = msg.get('from', '').split('@')[0]
-        text = msg.get('body', '').strip().lower()
-        
-        logger.info(f"Processing message from {phone}: {text}")
-        
-        # Always reply to test the connection
-        reply = f"🤖 Bot received: {text}"
-        send_response = send_whatsapp_message(phone, reply)
-        
-        if send_response:
-            logger.info(f"Reply sent successfully: {reply}")
-        else:
-            logger.error("Failed to send reply")
-    
-    return jsonify({'status': 'processed'})
-
-def send_whatsapp_message(phone, text):
     try:
-        response = requests.post(
-            f"{CONFIG['ultramsg']['base_url']}/messages/chat",
-            data={
-                'token': CONFIG['ultramsg']['token'],
-                'to': phone,
-                'body': text
-            },
-            timeout=10
-        )
-        logger.info(f"Message API response: {response.status_code} - {response.text}")
-        return response.json()
+        # 1. Handle verification challenge
+        if request.method == 'GET':
+            if request.args.get('token') == ULTRA_MSG_TOKEN:
+                return request.args.get('challenge', '')
+            return "Invalid token", 403
+
+        # 2. Process incoming messages
+        data = request.json
+        logger.info(f"RAW INCOMING DATA:\n{data}")
+
+        if data.get('event') == 'message_received':
+            msg = data['data']
+            phone = msg['from'].split('@')[0]  # Remove @c.us
+            text = msg.get('body', '').lower().strip()
+
+            # 3. DEBUG: Immediate test reply
+            test_reply = f"✅ Bot working! You said: {text}"
+            send_result = send_message(phone, test_reply)
+            
+            if not send_result:
+                logger.error("FAILED TO SEND REPLY")
+            else:
+                logger.info(f"REPLY SENT TO {phone}")
+
+        return jsonify({"status": "processed"})
+
     except Exception as e:
-        logger.error(f"Error sending message: {str(e)}")
-        return None
+        logger.error(f"CRITICAL ERROR: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+def send_message(phone, text):
+    """Send message with ULTRA-THOROUGH error handling"""
+    for attempt in range(3):  # 3 retries
+        try:
+            start_time = time.time()
+            response = requests.post(
+                f"{BASE_URL}/messages/chat",
+                data={
+                    'token': ULTRA_MSG_TOKEN,
+                    'to': phone,
+                    'body': text
+                },
+                timeout=10
+            )
+            logger.info(f"API RESPONSE ({time.time()-start_time:.2f}s): {response.status_code} - {response.text}")
+            
+            if response.json().get('sent') is True:
+                return True
+                
+        except Exception as e:
+            logger.error(f"Attempt {attempt+1} failed: {str(e)}")
+            time.sleep(2)
+    
+    return False
 
 if __name__ == '__main__':
-    logger.info("🚀 Starting WhatsApp Bot Server...")
+    logger.info("🔥 BOT STARTED - WAITING FOR MESSAGES 🔥")
     serve(app, host='0.0.0.0', port=8000)

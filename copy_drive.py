@@ -1,6 +1,6 @@
 import requests
 import asyncio
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from flask import Flask, jsonify
 import logging
@@ -31,35 +31,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def convert_telegram_to_whatsapp(text):
-    """Convert Telegram formatting to WhatsApp formatting"""
-    if not text:
-        return text
-    
-    # Convert bold: <b>text</b> or **text** to *text*
-    text = re.sub(r'<b>(.*?)</b>|\\*\\*(.*?)\\*\\*', r'*\1\2*', text)
-    
-    # Convert italic: <i>text</i> or __text__ to _text_
-    text = re.sub(r'<i>(.*?)</i>|__(.*?)__', r'_\1\2_', text)
-    
-    # Convert code: <code>text</code> or `text` to ```text```
-    text = re.sub(r'<code>(.*?)</code>|`(.*?)`', r'```\1\2```', text)
-    
-    # Convert underline: <u>text</u> to ~text~
-    text = re.sub(r'<u>(.*?)</u>', r'~\1~', text)
-    
-    # Remove other HTML tags
-    text = re.sub(r'<.*?>', '', text)
-    
-    return text
-
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update.channel_post and update.channel_post.chat.username == SOURCE_CHANNEL.strip('@'):
             message = update.channel_post
             logger.info(f"New message received: {message.message_id}")
             
-            # Forward original message to Telegram channel
+            # Forward to Telegram
             await context.bot.forward_message(
                 chat_id=DESTINATION_CHANNEL,
                 from_chat_id=SOURCE_CHANNEL,
@@ -67,74 +45,52 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             logger.info("Message forwarded to Telegram channel")
             
-            # Prepare WhatsApp message
+            # Send to WhatsApp
             if message.text:
-                whatsapp_text = convert_telegram_to_whatsapp(message.text)
                 payload = {
                     "token": WHATSAPP_API_TOKEN,
                     "to": WHATSAPP_NUMBER,
-                    "body": whatsapp_text
+                    "body": message.text
                 }
-                response = requests.post(f"{ULTRA_MSG_BASE_URL}/messages/chat", data=payload)
-                logger.info(f"Text sent to WhatsApp: {response.json()}")
+                requests.post(f"{ULTRA_MSG_BASE_URL}/messages/chat", data=payload)
+                logger.info("Text sent to WhatsApp")
             
-            elif message.caption:
-                whatsapp_text = convert_telegram_to_whatsapp(message.caption)
-                if message.photo:
-                    photo = message.photo[-1]
-                    file = await photo.get_file()
-                    payload = {
-                        "token": WHATSAPP_API_TOKEN,
-                        "to": WHATSAPP_NUMBER,
-                        "image": file.file_path,
-                        "caption": whatsapp_text
-                    }
-                    response = requests.post(f"{ULTRA_MSG_BASE_URL}/messages/image", data=payload)
-                    logger.info(f"Photo with caption sent to WhatsApp: {response.json()}")
-                
-                elif message.video:
-                    file = await message.video.get_file()
-                    payload = {
-                        "token": WHATSAPP_API_TOKEN,
-                        "to": WHATSAPP_NUMBER,
-                        "video": file.file_path,
-                        "caption": whatsapp_text
-                    }
-                    response = requests.post(f"{ULTRA_MSG_BASE_URL}/messages/video", data=payload)
-                    logger.info(f"Video with caption sent to WhatsApp: {response.json()}")
+            elif message.photo:
+                photo = message.photo[-1]
+                file = await photo.get_file()
+                payload = {
+                    "token": WHATSAPP_API_TOKEN,
+                    "to": WHATSAPP_NUMBER,
+                    "image": file.file_path,
+                    "caption": message.caption or ""
+                }
+                requests.post(f"{ULTRA_MSG_BASE_URL}/messages/image", data=payload)
+                logger.info("Photo sent to WhatsApp")
+            
+            elif message.video:
+                file = await message.video.get_file()
+                payload = {
+                    "token": WHATSAPP_API_TOKEN,
+                    "to": WHATSAPP_NUMBER,
+                    "video": file.file_path,
+                    "caption": message.caption or ""
+                }
+                requests.post(f"{ULTRA_MSG_BASE_URL}/messages/video", data=payload)
+                logger.info("Video sent to WhatsApp")
 
     except Exception as e:
         logger.error(f"Error in forward_message: {str(e)}")
 
 def run_bot():
     """Run the Telegram bot in its own event loop"""
-    # Create a new event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # Configure the bot to not use signals
-    application = Application.builder() \
-        .token(TELEGRAM_BOT_TOKEN) \
-        .connect_timeout(30) \
-        .read_timeout(30) \
-        .write_timeout(30) \
-        .build()
-    
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL, forward_message))
     
     logger.info("Starting Telegram bot polling...")
-    
-    # Run polling with a custom loop and disable signal handling
-    loop.run_until_complete(application.initialize())
-    loop.create_task(application.start())
-    try:
-        loop.run_forever()
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
-        loop.run_until_complete(application.stop())
-        loop.run_until_complete(application.shutdown())
-        loop.close()
+    application.run_polling()
 
 if __name__ == '__main__':
     # Start Telegram bot in a separate thread
@@ -143,4 +99,4 @@ if __name__ == '__main__':
     
     # Start Flask server
     logger.info("Starting Flask server...")
-    app.run(host='0.0.0.0', port=8000, use_reloader=False)
+    app.run(host='0.0.0.0', port=8000)

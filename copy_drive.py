@@ -3,7 +3,6 @@ from waitress import serve
 import requests
 import logging
 import os
-import validators
 import time
 
 app = Flask(__name__)
@@ -32,7 +31,6 @@ def webhook():
     try:
         logger.info(f"\n{'='*50}\nIncoming request: {request.method}")
         
-        # Verification challenge (if needed)
         if request.method == 'GET':
             return jsonify({"status": "active"}), 200
 
@@ -43,19 +41,11 @@ def webhook():
 
         logger.info(f"Request data: {data}")
 
-        # Process incoming messages - GreenAPI format
-        if data.get('typeWebhook') == 'incomingMessageReceived' or data.get('event_type') == 'message_received':
-            # Handle both possible webhook formats
-            message_data = data.get('messageData', {}) or data.get('data', {})
-            sender_data = data.get('senderData', {}) or {}
-            
-            # Extract sender number
-            sender = sender_data.get('sender', '') or message_data.get('from', '')
-            sender_number = sender.replace('@c.us', '')
-            
-            # Extract message text
-            message_text = (message_data.get('textMessageData', {}).get('textMessage', '') 
-                          or message_data.get('body', '')).strip()
+        # Process incoming messages
+        if data.get('event_type') == 'message_received':
+            message_data = data.get('data', {})
+            sender_number = message_data.get('from', '').split('@')[0]
+            message_text = message_data.get('body', '').strip()
             
             # Only respond to authorized number
             if sender_number != AUTHORIZED_NUMBER:
@@ -64,8 +54,8 @@ def webhook():
             
             logger.info(f"Processing message from {sender_number}: {message_text}")
             
-            # Check if message is a valid URL
-            if validators.url(message_text):
+            # Check if message looks like a URL (simplified check)
+            if message_text.startswith(('http://', 'https://')):
                 # Download and send back the media
                 process_media_url(message_text, sender_number)
             else:
@@ -80,20 +70,32 @@ def webhook():
 def process_media_url(url, recipient_number, retries=3):
     """Download media from URL and send back to user"""
     try:
-        # Check if the URL points to a media file
-        if not any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.webm']):
-            send_message(recipient_number, "The link must point directly to an image (jpg, png, gif) or video (mp4, mov) file.")
-            return
-        
         send_message(recipient_number, "🔍 Downloading your media file...")
         
         # Download the file
-        filename = os.path.join(TEMP_DIR, url.split('/')[-1].split('?')[0])
+        filename = os.path.join(TEMP_DIR, f"downloaded_{int(time.time())}")
         
         for attempt in range(retries):
             try:
                 response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
+                
+                # Determine content type from headers
+                content_type = response.headers.get('content-type', '')
+                
+                # Set appropriate file extension
+                if 'image' in content_type:
+                    filename += '.jpg'  # Default to jpg for images
+                elif 'video' in content_type:
+                    filename += '.mp4'  # Default to mp4 for videos
+                else:
+                    # If content type not clear, try to guess from URL
+                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+                        filename += '.jpg'
+                    elif any(url.lower().endswith(ext) for ext in ['.mp4', '.mov', '.webm']):
+                        filename += '.mp4'
+                    else:
+                        filename += '.bin'  # Fallback extension
                 
                 with open(filename, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -106,23 +108,32 @@ def process_media_url(url, recipient_number, retries=3):
                     raise
                 time.sleep(2)
         
-        # Determine media type
-        if filename.lower().endswith(('.mp4', '.mov', '.webm')):
-            media_type = 'video'
-            mime_type = 'video/mp4'
-        else:
+        # Determine media type and MIME type
+        if 'image' in content_type:
             media_type = 'image'
-            mime_type = 'image/jpeg'
+            mime_type = content_type or 'image/jpeg'
+        elif 'video' in content_type:
+            media_type = 'video'
+            mime_type = content_type or 'video/mp4'
+        else:
+            # Fallback based on file extension
+            if filename.lower().endswith(('.mp4', '.mov', '.webm')):
+                media_type = 'video'
+                mime_type = 'video/mp4'
+            else:
+                media_type = 'image'
+                mime_type = 'image/jpeg'
         
         # Send the file back
         send_file(recipient_number, filename, media_type, mime_type)
         
         # Clean up
-        os.remove(filename)
+        if os.path.exists(filename):
+            os.remove(filename)
         
     except Exception as e:
         logger.error(f"Error processing media URL: {str(e)}")
-        send_message(recipient_number, "❌ Failed to process the media file. Please check the link and try again.")
+        send_message(recipient_number, f"❌ Error: {str(e)}")
 
 def send_message(recipient_number, text, retries=3):
     """Send WhatsApp message"""

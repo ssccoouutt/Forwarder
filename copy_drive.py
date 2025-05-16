@@ -43,13 +43,19 @@ def webhook():
 
         logger.info(f"Request data: {data}")
 
-        # Process incoming messages
-        if data.get('typeWebhook') == 'incomingMessageReceived':
-            message_data = data.get('messageData', {})
-            sender_data = data.get('senderData', {})
+        # Process incoming messages - GreenAPI format
+        if data.get('typeWebhook') == 'incomingMessageReceived' or data.get('event_type') == 'message_received':
+            # Handle both possible webhook formats
+            message_data = data.get('messageData', {}) or data.get('data', {})
+            sender_data = data.get('senderData', {}) or {}
             
-            sender_number = sender_data.get('sender', '').replace('@c.us', '')
-            message_text = message_data.get('textMessageData', {}).get('textMessage', '').strip()
+            # Extract sender number
+            sender = sender_data.get('sender', '') or message_data.get('from', '')
+            sender_number = sender.replace('@c.us', '')
+            
+            # Extract message text
+            message_text = (message_data.get('textMessageData', {}).get('textMessage', '') 
+                          or message_data.get('body', '')).strip()
             
             # Only respond to authorized number
             if sender_number != AUTHORIZED_NUMBER:

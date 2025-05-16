@@ -1,6 +1,5 @@
 import requests
 import asyncio
-import re
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from flask import Flask, jsonify
@@ -109,14 +108,33 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def run_bot():
     """Run the Telegram bot in its own event loop"""
+    # Create a new event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Configure the bot to not use signals
+    application = Application.builder() \
+        .token(TELEGRAM_BOT_TOKEN) \
+        .connect_timeout(30) \
+        .read_timeout(30) \
+        .write_timeout(30) \
+        .build()
+    
     application.add_handler(MessageHandler(filters.ALL, forward_message))
     
     logger.info("Starting Telegram bot polling...")
-    application.run_polling()
+    
+    # Run polling with a custom loop and disable signal handling
+    loop.run_until_complete(application.initialize())
+    loop.create_task(application.start())
+    try:
+        loop.run_forever()
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        loop.run_until_complete(application.stop())
+        loop.run_until_complete(application.shutdown())
+        loop.close()
 
 if __name__ == '__main__':
     # Start Telegram bot in a separate thread
@@ -125,4 +143,4 @@ if __name__ == '__main__':
     
     # Start Flask server
     logger.info("Starting Flask server...")
-    app.run(host='0.0.0.0', port=8000)
+    app.run(host='0.0.0.0', port=8000, use_reloader=False)

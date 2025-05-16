@@ -1,147 +1,206 @@
-from flask import Flask, request, jsonify
-from waitress import serve
-import requests
+import os
 import logging
-import time
+import re
+import tempfile
+import asyncio
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+    ConversationHandler
+)
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from yt_dlp import YoutubeDL
+from aiohttp import web
 
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+# Configuration
+SCOPES = ['https://www.googleapis.com/auth/drive']
+TELEGRAM_BOT_TOKEN = "8080486871:AAECgE7E8cbkrBqFQdqLdtz89-7-v17u6qI"
+CLIENT_SECRET_FILE = 'credentials.json'
+TOKEN_FILE = 'token.json'
+COOKIES_FILE = 'cookies.txt'  # Make sure this is in your repository
+PORT = 8000
+
+# State
+AUTH_STATE = 1
+pending_flows = {}
+
+# Logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# UltraMSG Configuration
-INSTANCE_ID = "instance116714"
-TOKEN = "j0253a3npbpb7ikw"
-BASE_URL = f"https://api.ultramsg.com/{INSTANCE_ID}"
+# Web Server
+async def health_check(request):
+    return web.Response(text="🤖 Bot is running")
 
-# GLIF Configuration
-GLIF_ID = "cm0zceq2a00023f114o6hti7w"
-API_TOKENS = [
-    "glif_a4ef6d3aa5d8575ea8448b29e293919a42a6869143fcbfc32f2e4a7dbe53199a",
-    "glif_51d216db54438b777c4170cd8913d628ff0af09789ed5dbcbd718fa6c6968bb1",
-    "glif_c9dc66b31537b5a423446bbdead5dc2dbd73dc1f4a5c47a9b77328abcbc7b755",
-    "glif_f5a55ee6d767b79f2f3af01c276ec53d14475eace7cabf34b22f8e5968f3fef5",
-    "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
-    "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
-]
+async def run_webserver():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Health check running on port {PORT}")
+    return runner
 
-@app.route('/')
-def health_check():
-    """Endpoint for Koyeb health checks"""
-    return jsonify({"status": "ready"})
-
-@app.route('/webhook', methods=['GET', 'POST'])
-def webhook():
-    try:
-        logger.info(f"\n{'='*50}\nIncoming request: {request.method}")
-        
-        # Verification challenge
-        if request.method == 'GET':
-            if request.args.get('token') == TOKEN:
-                return request.args.get('challenge', '')
-            return "Invalid token", 403
-
-        data = request.json
-        if not data:
-            logger.error("No data received")
-            return jsonify({'status': 'error', 'message': 'No data received'}), 400
-
-        logger.info(f"Request data: {data}")
-
-        # Process messages
-        if data.get('event_type') == 'message_received':
-            msg_data = data.get('data', {})
-            phone = msg_data.get('from', '').split('@')[0]
-            message = msg_data.get('body', '').strip().lower()
-
-            logger.info(f"Processing message from {phone}: {message}")
-
-            # Command handling
-            if message in ['hi', 'hello', 'hey']:
-                send_message(phone, "👋 Hi! Send me any video topic to generate a thumbnail!")
-                return jsonify({'status': 'success'})
-                
-            elif message in ['help', 'info']:
-                send_message(phone, "ℹ️ Just send me a video topic (e.g. 'cooking tutorial') and I'll create a thumbnail!")
-                return jsonify({'status': 'success'})
-                
-            # Thumbnail generation
-            elif len(message) > 3:
-                send_message(phone, "🔄 Generating your thumbnail... (20-30 seconds)")
-                
-                for token in API_TOKENS:
-                    result = generate_thumbnail(message, token)
-                    if result.get('status') == 'success':
-                        send_image(phone, result['image_url'], f"🎨 Thumbnail for: {message}")
-                        send_message(phone, f"🔗 Direct URL: {result['image_url']}")
-                        return jsonify({'status': 'success'})
-                
-                send_message(phone, "❌ Failed to generate. Please try different keywords.")
-
-        return jsonify({'status': 'ignored'})
+# ====== WORKING AUTHORIZATION FLOW ======
+async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRET_FILE,
+        scopes=SCOPES,
+        redirect_uri='http://localhost:8080'
+    )
+    auth_url, _ = flow.authorization_url(prompt='consent')
+    pending_flows[update.effective_user.id] = flow
     
-    except Exception as e:
-        logger.error(f"CRITICAL ERROR: {str(e)}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    await update.message.reply_text(
+        "🔑 AUTHORIZATION STEPS:\n\n"
+        "1. Click: " + auth_url + "\n"
+        "2. Approve access\n"
+        "3. Copy the LOCALHOST URL\n"
+        "4. Send it back to me\n\n"
+        "⚠️ Ignore browser errors after approving",
+        disable_web_page_preview=True
+    )
+    return AUTH_STATE
 
-def send_message(phone, text, retries=3):
-    """Send WhatsApp message with retry logic"""
-    for attempt in range(retries):
-        try:
-            response = requests.post(
-                f"{BASE_URL}/messages/chat",
-                data={'token': TOKEN, 'to': phone, 'body': text},
-                timeout=10
-            )
-            logger.info(f"Message sent to {phone} (attempt {attempt+1})")
-            return response.json()
-        except Exception as e:
-            logger.warning(f"Message send failed (attempt {attempt+1}): {str(e)}")
-            time.sleep(2)
-    logger.error(f"Failed to send message to {phone} after {retries} attempts")
-    return None
-
-def send_image(phone, url, caption, retries=3):
-    """Send WhatsApp image with retry logic"""
-    for attempt in range(retries):
-        try:
-            response = requests.post(
-                f"{BASE_URL}/messages/image",
-                data={'token': TOKEN, 'to': phone, 'image': url, 'caption': caption},
-                timeout=20
-            )
-            logger.info(f"Image sent to {phone} (attempt {attempt+1})")
-            return response.json()
-        except Exception as e:
-            logger.warning(f"Image send failed (attempt {attempt+1}): {str(e)}")
-            time.sleep(2)
-    logger.error(f"Failed to send image to {phone} after {retries} attempts")
-    return None
-
-def generate_thumbnail(prompt, token, max_length=100):
-    """Generate thumbnail using GLIF API"""
+async def handle_auth_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    url = update.message.text.strip()
+    
+    if 'localhost' not in url or 'code=' not in url:
+        await update.message.reply_text("❌ Send the EXACT localhost URL from your browser")
+        return AUTH_STATE
+    
     try:
-        logger.info(f"Generating thumbnail for: {prompt[:max_length]}")
-        response = requests.post(
-            f"https://simple-api.glif.app/{GLIF_ID}",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"prompt": prompt[:max_length], "style": "youtube_trending"},
-            timeout=30
-        )
-        data = response.json()
+        code = url.split('code=')[1].split('&')[0]
+        flow = pending_flows[user_id]
+        flow.fetch_token(code=code)
         
-        # Check all possible response formats
-        for key in ["output", "image_url", "url"]:
-            if key in data and isinstance(data[key], str) and data[key].startswith('http'):
-                logger.info(f"Successfully generated image: {data[key]}")
-                return {'status': 'success', 'image_url': data[key]}
+        with open(TOKEN_FILE, 'w') as token_file:
+            token_file.write(flow.credentials.to_json())
         
-        logger.warning(f"Unexpected GLIF response: {data}")
-        return {'status': 'error'}
-        
+        del pending_flows[user_id]
+        await update.message.reply_text("✅ AUTHORIZATION SUCCESSFUL! Now send YouTube links")
+        return ConversationHandler.END
     except Exception as e:
-        logger.error(f"GLIF API error: {str(e)}")
-        return {'status': 'error'}
+        await update.message.reply_text(f"❌ FAILED: {str(e)}\nTry /auth again")
+        return ConversationHandler.END
+
+# ====== YOUTUBE DOWNLOAD WITH COOKIES ======
+async def download_youtube_video(url):
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
+        'quiet': True,
+        'cookiefile': COOKIES_FILE,
+        'extract_flat': False,
+    }
+    
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
+            return file_path, info['title']
+    except Exception as e:
+        logger.error(f"YouTube download failed: {str(e)}")
+        raise Exception("Failed to download video. Make sure cookies.txt is valid.")
+
+# ====== DRIVE UPLOAD ======
+def get_drive_service():
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            raise Exception('Use /auth first')
+    return build('drive', 'v3', credentials=creds)
+
+async def upload_to_drive(file_path, file_name):
+    service = get_drive_service()
+    media = MediaFileUpload(file_path)
+    file = service.files().create(
+        body={'name': file_name},
+        media_body=media,
+        fields='id'
+    ).execute()
+    return file.get('id')
+
+# ====== MESSAGE HANDLERS ======
+async def handle_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text
+    try:
+        # Check Drive auth first
+        get_drive_service()
+        
+        await update.message.reply_text("⬇️ Downloading video...")
+        file_path, title = await download_youtube_video(url)
+        
+        await update.message.reply_text("⬆️ Uploading to Drive...")
+        file_id = await upload_to_drive(file_path, f"{title}.mp4")
+        
+        await update.message.reply_text(f"✅ Uploaded! File ID: {file_id}")
+        os.remove(file_path)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    
+    if re.match(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+', text):
+        await handle_youtube(update, context)
+    else:
+        await update.message.reply_text("Send YouTube links or /auth")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Send YouTube links to upload to Google Drive\n"
+        "First run /auth to authorize"
+    )
+
+# ====== MAIN APP ======
+async def run_bot():
+    runner = await run_webserver()
+    
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Auth conversation
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("auth", auth_command)],
+        states={
+            AUTH_STATE: [MessageHandler(filters.TEXT, handle_auth_url)]
+        },
+        fallbacks=[]
+    )
+    
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    logger.info("Bot is running and ready")
+    
+    while True:
+        await asyncio.sleep(1)
 
 if __name__ == '__main__':
-    logger.info("Starting WhatsApp Thumbnail Generator...")
-    serve(app, host='0.0.0.0', port=8000)
+    # Verify cookies file exists
+    if not os.path.exists(COOKIES_FILE):
+        logger.error("❌ cookies.txt not found! Download will fail without it")
+    
+    asyncio.run(run_bot())

@@ -33,31 +33,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def clean_escapes(text):
+    """Remove unnecessary escape characters from Telegram's MarkdownV2"""
+    if not text:
+        return text
+    # Remove escapes before these characters: . - _ * [ ] ( ) ~ ` > # + = | { } ! 
+    return re.sub(r'\\([._*\[\]()~`>#+=|{}!-])', r'\1', text)
+
 def convert_telegram_to_whatsapp(text):
     """Convert Telegram formatting to WhatsApp formatting"""
     if not text:
         return text
     
-    # Replace HTML tags with WhatsApp formatting
+    # First clean escape characters
+    text = clean_escapes(text)
+    
+    # Handle quotes (remove formatting for WhatsApp)
+    text = re.sub(r'^>\s?(.*)$', r'\1', text, flags=re.MULTILINE)
+    
+    # Replace formatting
     replacements = [
         (r'<b>(.*?)</b>', r'*\1*'),      # bold
-        (r'<strong>(.*?)</strong>', r'*\1*'), # alternative bold
+        (r'<strong>(.*?)</strong>', r'*\1*'),
         (r'<i>(.*?)</i>', r'_\1_'),      # italic
-        (r'<em>(.*?)</em>', r'_\1_'),    # alternative italic
-        (r'<u>(.*?)</u>', r'~\1~'),       # underline
-        (r'<s>(.*?)</s>', r'~\1~'),       # strikethrough
-        (r'<del>(.*?)</del>', r'~\1~'),   # alternative strikethrough
-        (r'<code>(.*?)</code>', r'```\1```'), # code
-        (r'<pre>(.*?)</pre>', r'```\1```') # preformatted
+        (r'<em>(.*?)</em>', r'_\1_'),
+        (r'<u>(.*?)</u>', r'~\1~'),      # underline
+        (r'<s>(.*?)</s>', r'~\1~'),      # strikethrough
+        (r'<del>(.*?)</del>', r'~\1~'),
+        (r'<code>(.*?)</code>', r'```\1```'),
+        (r'<pre>(.*?)</pre>', r'```\1```')
     ]
     
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text)
-    
-    # Clean up any nested formatting
-    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)  # **bold** to *bold*
-    text = re.sub(r'__(.*?)__', r'_\1_', text)      # __italic__ to _italic_
-    text = re.sub(r'~~(.*?)~~', r'~\1~', text)      # ~~strike~~ to ~strike~
     
     return text
 

@@ -12,10 +12,11 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# UltraMSG Configuration
+# Configuration
 INSTANCE_ID = "instance116714"
 TOKEN = "j0253a3npbpb7ikw"
 BASE_URL = f"https://api.ultramsg.com/{INSTANCE_ID}"
+COOKIES_FILE = "cookies.txt"  # Path to cookies file
 
 @app.route('/')
 def health_check():
@@ -24,34 +25,25 @@ def health_check():
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     try:
-        # Log incoming request
-        logger.info(f"\n{'='*50}\nINCOMING REQUEST:\n"
-                   f"Method: {request.method}\n"
-                   f"Headers: {dict(request.headers)}\n"
-                   f"Args: {request.args}\n"
-                   f"JSON: {request.json}\n"
-                   f"{'='*50}")
+        logger.info(f"\n{'='*50}\nINCOMING REQUEST:\nMethod: {request.method}\nHeaders: {dict(request.headers)}\nArgs: {request.args}\nJSON: {request.json}\n{'='*50}")
 
-        # Handle verification
         if request.method == 'GET':
             if request.args.get('token') == TOKEN:
                 return request.args.get('challenge', '')
             return "Invalid token", 403
 
-        # Process messages
         data = request.json
         if not data:
             logger.error("No data received")
             return jsonify({"error": "No data"}), 400
 
-        if data.get('event_type') == 'message_received':  # Changed from 'event'
+        if data.get('event_type') == 'message_received':
             msg = data.get('data', {})
             phone = msg.get('from', '').split('@')[0]
             text = msg.get('body', '').strip()
 
             logger.info(f"Processing message from {phone}: {text}")
 
-            # Command handling
             if text.lower() in ['hi', 'hello', 'hey']:
                 send_message(phone, "📺 Hello! Send me any YouTube URL to download the video")
                 return jsonify({"status": "success"})
@@ -60,7 +52,6 @@ def webhook():
                 send_message(phone, "ℹ️ Just send me a YouTube URL and I'll download the video for you!\nExample: https://youtu.be/dQw4w9WgXcQ")
                 return jsonify({"status": "success"})
 
-            # YouTube URL handling
             elif is_youtube_url(text):
                 return handle_youtube_request(phone, text)
             else:
@@ -79,12 +70,13 @@ def handle_youtube_request(phone, url):
     try:
         send_message(phone, "⏳ Downloading video... (3-5 minutes for HD)")
         
-        # Download video
         file_path, title = download_youtube_video(url)
+        if not file_path:
+            raise Exception("Failed to download video")
+
         file_size = os.path.getsize(file_path)
         logger.info(f"Downloaded: {title} ({file_size/1024/1024:.2f}MB)")
         
-        # Send video
         send_video(phone, file_path, f"🎬 {title}")
         os.remove(file_path)
         
@@ -97,28 +89,40 @@ def handle_youtube_request(phone, url):
 
 def download_youtube_video(url):
     ydl_opts = {
-        'format': 'best[filesize<20M]',  # Limit to 20MB files
+        'format': 'best[filesize<20M]',
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
         'quiet': False,
         'extract_flat': False,
+        'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
+        'ignoreerrors': True,
+        'retries': 3,
+        'socket_timeout': 30,
+        'extractor_args': {
+            'youtube': {
+                'skip': ['hls', 'dash', 'translated_subs']
+            }
+        }
     }
     
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        file_path = ydl.prepare_filename(info)
-        return file_path, info['title']
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info:
+                raise Exception("Failed to extract video info")
+                
+            file_path = ydl.prepare_filename(info)
+            return file_path, info['title']
+            
+    except Exception as e:
+        logger.error(f"YT-DLP ERROR: {str(e)}")
+        raise Exception("YouTube download failed. The video may be restricted or unavailable")
 
 def send_message(phone, text, retries=3):
-    """Send WhatsApp message with retry logic"""
     for attempt in range(retries):
         try:
             response = requests.post(
                 f"{BASE_URL}/messages/chat",
-                data={
-                    'token': TOKEN,
-                    'to': phone,
-                    'body': text
-                },
+                data={'token': TOKEN, 'to': phone, 'body': text},
                 timeout=15
             )
             logger.info(f"Message sent to {phone} (attempt {attempt+1}): {response.status_code}")
@@ -130,17 +134,12 @@ def send_message(phone, text, retries=3):
     return None
 
 def send_video(phone, file_path, caption="", retries=3):
-    """Send WhatsApp video with retry logic"""
     for attempt in range(retries):
         try:
             with open(file_path, 'rb') as video_file:
                 response = requests.post(
                     f"{BASE_URL}/messages/video",
-                    data={
-                        'token': TOKEN,
-                        'to': phone,
-                        'caption': caption
-                    },
+                    data={'token': TOKEN, 'to': phone, 'caption': caption},
                     files={'video': video_file},
                     timeout=300
                 )
@@ -153,13 +152,5 @@ def send_video(phone, file_path, caption="", retries=3):
     return None
 
 if __name__ == '__main__':
-    logger.info("""
-    ██╗   ██╗██████╗ ████████╗██╗   ██╗██████╗ ███████╗
-    ╚██╗ ██╔╝██╔══██╗╚══██╔══╝██║   ██║██╔══██╗██╔════╝
-     ╚████╔╝ ██████╔╝   ██║   ██║   ██║██████╔╝█████╗  
-      ╚██╔╝  ██╔═══╝    ██║   ██║   ██║██╔══██╗██╔══╝  
-       ██║   ██║        ██║   ╚██████╔╝██████╔╝███████╗
-       ╚═╝   ██╝        ╚═╝    ╚═════╝ ╚═════╝ ╚══════╝
-    WhatsApp YouTube Downloader Service
-    """)
+    logger.info("Starting YouTube Downloader Service with cookies support...")
     serve(app, host='0.0.0.0', port=8000)

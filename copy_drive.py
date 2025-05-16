@@ -8,7 +8,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ===== CONFIGURATION =====
+# Configuration
 ULTRA_MSG = {
     "token": "j0253a3npbpb7ikw",
     "instance_id": "instance116714",
@@ -24,174 +24,128 @@ GLIF = {
         "glif_f5a55ee6d767b79f2f3af01c276ec53d14475eace7cabf34b22f8e5968f3fef5",
         "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
         "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
-    ],
-    "styles": ["youtube_trending", "digital_art", "cinematic"],
-    "timeout": 35
+    ]
 }
 
-# ===== FLASK ROUTES =====
 @app.route('/')
 def health_check():
-    return jsonify({
-        "status": "ready",
-        "service": "WhatsApp Thumbnail Generator",
-        "endpoints": {
-            "webhook": "POST /webhook",
-            "health": "GET /"
-        }
-    })
+    return jsonify({"status": "ready"})
 
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     try:
-        # Verification challenge
+        # 1. First log the complete request
+        logger.info(f"\n{'='*50}\nINCOMING REQUEST:\n"
+                   f"Method: {request.method}\n"
+                   f"Headers: {dict(request.headers)}\n"
+                   f"Args: {request.args}\n"
+                   f"Data: {request.data}\n"
+                   f"JSON: {request.json}\n"
+                   f"{'='*50}")
+
+        # 2. Handle verification
         if request.method == 'GET':
             if request.args.get('token') == ULTRA_MSG["token"]:
-                logger.info("Webhook verified successfully")
                 return request.args.get('challenge', '')
-            logger.warning("Invalid verification token")
             return "Invalid token", 403
 
+        # 3. Process messages
         data = request.json
         if not data:
-            logger.error("No data received in webhook")
-            return jsonify({"error": "No data received"}), 400
+            return jsonify({"error": "No data"}), 400
 
-        logger.info(f"Incoming message: {data.get('data', {}).get('from', '')}")
-
+        # UltraMSG sends different event types
         if data.get('event') == 'message_received':
-            return process_message(data.get('data', {}))
+            return handle_message(data.get('data', {}))
         
-        logger.info(f"Ignoring event: {data.get('event')}")
+        # Ignore other events (acknowledgements, etc)
         return jsonify({"status": "ignored"})
 
     except Exception as e:
-        logger.error(f"Webhook processing failed: {str(e)}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"CRITICAL ERROR: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
-# ===== CORE FUNCTIONALITY =====
-def process_message(msg):
-    phone = msg.get('from', '').split('@')[0]
-    text = msg.get('body', '').strip().lower()
-
-    # Command processing
-    if not text:
-        logger.warning("Empty message received")
-        return send_message(phone, "❌ Please send a valid message")
-
-    if text in ['hi', 'hello', 'hey']:
-        return send_message(phone, "👋 Send me a topic to generate a thumbnail!\nExample: 'mountain sunset'")
-
-    if text in ['help', 'info']:
-        help_text = (
-            "ℹ️ *Thumbnail Generator Help*\n\n"
-            "Just send me a topic and I'll create a thumbnail!\n"
-            "Examples:\n"
-            "- 'cyberpunk city'\n"
-            "- 'sunset beach'\n"
-            "- 'cooking tutorial'\n\n"
-            "I'll generate different styles automatically!"
-        )
-        return send_message(phone, help_text)
-
-    # Generate thumbnail
-    send_message(phone, "🔄 Generating your thumbnail... (30-45 seconds)")
-    
-    generated = False
-    for style in GLIF["styles"]:
-        for token in GLIF["tokens"]:
-            image_url = generate_thumbnail(text, token, style)
-            if image_url:
-                send_image(phone, image_url, f"🎨 {text.title()} ({style.replace('_', ' ')})")
-                send_message(phone, f"🔗 Direct URL: {image_url}")
-                generated = True
-                break
-        if generated:
-            break
-
-    if not generated:
-        send_message(phone, "❌ All generation attempts failed. Please try different keywords later.")
-    
-    return jsonify({"status": "success" if generated else "failed"})
-
-# ===== SERVICE FUNCTIONS =====
-def send_message(phone, text, retries=3):
-    for attempt in range(retries):
-        try:
-            response = requests.post(
-                f"{ULTRA_MSG['base_url']}/messages/chat",
-                data={
-                    'token': ULTRA_MSG['token'],
-                    'to': phone,
-                    'body': text
-                },
-                timeout=15
-            )
-            logger.info(f"Message sent to {phone} (attempt {attempt + 1})")
-            return response.json()
-        except Exception as e:
-            logger.warning(f"Message send failed (attempt {attempt + 1}): {str(e)}")
-            time.sleep(2)
-    logger.error(f"Failed to send message to {phone} after {retries} attempts")
-    return None
-
-def send_image(phone, url, caption, retries=3):
-    for attempt in range(retries):
-        try:
-            response = requests.post(
-                f"{ULTRA_MSG['base_url']}/messages/image",
-                data={
-                    'token': ULTRA_MSG['token'],
-                    'to': phone,
-                    'image': url,
-                    'caption': caption
-                },
-                timeout=25
-            )
-            logger.info(f"Image sent to {phone} (attempt {attempt + 1})")
-            return response.json()
-        except Exception as e:
-            logger.warning(f"Image send failed (attempt {attempt + 1}): {str(e)}")
-            time.sleep(2)
-    logger.error(f"Failed to send image to {phone} after {retries} attempts")
-    return None
-
-def generate_thumbnail(prompt, token, style, max_length=100):
+def handle_message(msg):
     try:
-        logger.info(f"Generating thumbnail: {prompt} ({style})")
+        phone = msg.get('from', '').split('@')[0]
+        text = msg.get('body', '').strip().lower()
+
+        if not text:
+            return send_message(phone, "Please send a text message")
+
+        # Command processing
+        if text in ['hi', 'hello', 'hey']:
+            return send_message(phone, "👋 Send me a topic to generate a thumbnail!")
+            
+        if text in ['help', 'info']:
+            return send_message(phone, "ℹ️ Just send me a topic (e.g. 'sunset beach')")
+
+        # Generate thumbnail
+        send_message(phone, "🔄 Generating your thumbnail...")
+        
+        for token in GLIF["tokens"]:
+            image_url = generate_thumbnail(text, token)
+            if image_url:
+                send_image(phone, image_url, f"🎨 Thumbnail for: {text}")
+                send_message(phone, f"🔗 Direct URL: {image_url}")
+                return jsonify({"status": "success"})
+
+        send_message(phone, "❌ Failed to generate. Please try different keywords.")
+        return jsonify({"status": "error"})
+
+    except Exception as e:
+        logger.error(f"Message handling failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+def send_message(phone, text):
+    try:
+        response = requests.post(
+            f"{ULTRA_MSG['base_url']}/messages/chat",
+            data={
+                'token': ULTRA_MSG['token'],
+                'to': phone,
+                'body': text
+            },
+            timeout=10
+        )
+        logger.info(f"Message sent to {phone}")
+        return jsonify(response.json())
+    except Exception as e:
+        logger.error(f"Failed to send message: {str(e)}")
+        return None
+
+def send_image(phone, url, caption):
+    try:
+        response = requests.post(
+            f"{ULTRA_MSG['base_url']}/messages/image",
+            data={
+                'token': ULTRA_MSG['token'],
+                'to': phone,
+                'image': url,
+                'caption': caption
+            },
+            timeout=20
+        )
+        logger.info(f"Image sent to {phone}")
+        return response.json()
+    except Exception as e:
+        logger.error(f"Failed to send image: {str(e)}")
+        return None
+
+def generate_thumbnail(prompt, token):
+    try:
         response = requests.post(
             f"https://simple-api.glif.app/{GLIF['app_id']}",
             headers={"Authorization": f"Bearer {token}"},
-            json={
-                "prompt": prompt[:max_length],
-                "style": style,
-                "negative_prompt": "blurry, low quality, text, watermark"
-            },
-            timeout=GLIF["timeout"]
+            json={"prompt": prompt[:100], "style": "youtube_trending"},
+            timeout=30
         )
         data = response.json()
-        
-        # Check all possible response formats
-        for key in ["output", "image_url", "url"]:
-            if key in data and isinstance(data[key], str) and data[key].startswith('http'):
-                logger.info(f"Successfully generated image: {data[key]}")
-                return data[key]
-        
-        logger.warning(f"Unexpected GLIF response: {data}")
-        return None
-        
+        return data.get('image_url') or data.get('url') or data.get('output')
     except Exception as e:
         logger.error(f"GLIF API error: {str(e)}")
         return None
 
 if __name__ == '__main__':
-    logger.info("""
-    ████████╗██╗  ██╗██╗   ██╗███╗   ███╗██████╗ 
-    ╚══██╔══╝██║  ██║██║   ██║████╗ ████║██╔══██╗
-       ██║   ███████║██║   ██║██╔████╔██║██████╔╝
-       ██║   ██╔══██║██║   ██║██║╚██╔╝██║██╔═══╝ 
-       ██║   ██║  ██║╚██████╔╝██║ ╚═╝ ██║██║     
-       ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝╚═╝     
-    WhatsApp Thumbnail Generator Service
-    """)
+    logger.info("🚀 WhatsApp Thumbnail Generator Started")
     serve(app, host='0.0.0.0', port=8000)

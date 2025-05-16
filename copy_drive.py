@@ -6,6 +6,7 @@ from flask import Flask, jsonify
 import logging
 import threading
 import re
+import os
 
 # Initialize Flask app for Koyeb health checks
 app = Flask(__name__)
@@ -14,12 +15,12 @@ app = Flask(__name__)
 def health_check():
     return jsonify({"status": "healthy"})
 
-# Telegram Configuration (HARDCODED)
+# Telegram Configuration
 TELEGRAM_BOT_TOKEN = "7346090805:AAHUtCp7o7Kd2Ae9ybdJuzb7lRiHl7vyrn8"
 SOURCE_CHANNEL = "@Source069"
 DESTINATION_CHANNEL = "@Destination07"
 
-# UltraMSG Configuration (HARDCODED)
+# UltraMSG Configuration
 WHATSAPP_API_TOKEN = "j0253a3npbpb7ikw"
 WHATSAPP_INSTANCE_ID = "instance116714"
 WHATSAPP_NUMBER = "923247220362"
@@ -37,31 +38,37 @@ def convert_telegram_to_whatsapp(text):
     if not text:
         return text
     
-    # Convert bold: <b>text</b> or **text** to *text*
-    text = re.sub(r'<b>(.*?)</b>|\\*\\*(.*?)\\*\\*', lambda m: f"*{m.group(1) or m.group(2)}*", text)
+    # Replace HTML tags with WhatsApp formatting
+    replacements = [
+        (r'<b>(.*?)</b>', r'*\1*'),      # bold
+        (r'<strong>(.*?)</strong>', r'*\1*'), # alternative bold
+        (r'<i>(.*?)</i>', r'_\1_'),      # italic
+        (r'<em>(.*?)</em>', r'_\1_'),    # alternative italic
+        (r'<u>(.*?)</u>', r'~\1~'),       # underline
+        (r'<s>(.*?)</s>', r'~\1~'),       # strikethrough
+        (r'<del>(.*?)</del>', r'~\1~'),   # alternative strikethrough
+        (r'<code>(.*?)</code>', r'```\1```'), # code
+        (r'<pre>(.*?)</pre>', r'```\1```') # preformatted
+    ]
     
-    # Convert italic: <i>text</i> or __text__ to _text_
-    text = re.sub(r'<i>(.*?)</i>|__(.*?)__', lambda m: f"_{m.group(1) or m.group(2)}_", text)
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
     
-    # Convert underline: <u>text</u> to ~text~
-    text = re.sub(r'<u>(.*?)</u>', r'~\1~', text)
-    
-    # Convert code: <code>text</code> or `text` to ```text```
-    text = re.sub(r'<code>(.*?)</code>|`(.*?)`', lambda m: f"```{m.group(1) or m.group(2)}```", text)
-    
-    # Convert strikethrough: <s>text</s> or ~~text~~ to ~text~
-    text = re.sub(r'<s>(.*?)</s>|~~(.*?)~~', lambda m: f"~{m.group(1) or m.group(2)}~", text)
+    # Clean up any nested formatting
+    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)  # **bold** to *bold*
+    text = re.sub(r'__(.*?)__', r'_\1_', text)      # __italic__ to _italic_
+    text = re.sub(r'~~(.*?)~~', r'~\1~', text)      # ~~strike~~ to ~strike~
     
     return text
 
 async def send_copy_to_destination(context, message):
-    """Send a copy of the message to destination channel (not forwarded)"""
+    """Send a copy of the message to destination channel with original formatting"""
     try:
         if message.text:
             await context.bot.send_message(
                 chat_id=DESTINATION_CHANNEL,
-                text=message.text,
-                parse_mode='HTML'
+                text=message.text_markdown_v2 or message.text,
+                parse_mode='MarkdownV2'
             )
         elif message.photo:
             photo = message.photo[-1]
@@ -69,18 +76,18 @@ async def send_copy_to_destination(context, message):
             await context.bot.send_photo(
                 chat_id=DESTINATION_CHANNEL,
                 photo=file.file_id,
-                caption=message.caption or "",
-                parse_mode='HTML'
+                caption=message.caption_markdown_v2 if message.caption else None,
+                parse_mode='MarkdownV2'
             )
         elif message.video:
             file = await message.video.get_file()
             await context.bot.send_video(
                 chat_id=DESTINATION_CHANNEL,
                 video=file.file_id,
-                caption=message.caption or "",
-                parse_mode='HTML'
+                caption=message.caption_markdown_v2 if message.caption else None,
+                parse_mode='MarkdownV2'
             )
-        logger.info("Message copied to destination channel")
+        logger.info("Message copied to destination channel with original formatting")
     except Exception as e:
         logger.error(f"Error sending copy to destination: {str(e)}")
 
@@ -90,12 +97,18 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message = update.channel_post
             logger.info(f"New message received: {message.message_id}")
             
-            # Send copy to destination channel (not forwarded)
+            # Send copy to destination channel with original formatting
             await send_copy_to_destination(context, message)
             
-            # Send to WhatsApp with formatting conversion
+            # Prepare WhatsApp content
+            whatsapp_text = ""
             if message.text:
-                whatsapp_text = convert_telegram_to_whatsapp(message.text_html)
+                whatsapp_text = convert_telegram_to_whatsapp(message.text_markdown_v2 or message.text)
+            elif message.caption:
+                whatsapp_text = convert_telegram_to_whatsapp(message.caption_markdown_v2 or message.caption)
+            
+            # Send to WhatsApp
+            if message.text:
                 payload = {
                     "token": WHATSAPP_API_TOKEN,
                     "to": WHATSAPP_NUMBER,
@@ -107,24 +120,22 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif message.photo:
                 photo = message.photo[-1]
                 file = await photo.get_file()
-                whatsapp_caption = convert_telegram_to_whatsapp(message.caption_html if message.caption else "")
                 payload = {
                     "token": WHATSAPP_API_TOKEN,
                     "to": WHATSAPP_NUMBER,
                     "image": file.file_path,
-                    "caption": whatsapp_caption
+                    "caption": whatsapp_text if whatsapp_text else None
                 }
                 requests.post(f"{ULTRA_MSG_BASE_URL}/messages/image", data=payload)
                 logger.info("Photo sent to WhatsApp")
             
             elif message.video:
                 file = await message.video.get_file()
-                whatsapp_caption = convert_telegram_to_whatsapp(message.caption_html if message.caption else "")
                 payload = {
                     "token": WHATSAPP_API_TOKEN,
                     "to": WHATSAPP_NUMBER,
                     "video": file.file_path,
-                    "caption": whatsapp_caption
+                    "caption": whatsapp_text if whatsapp_text else None
                 }
                 requests.post(f"{ULTRA_MSG_BASE_URL}/messages/video", data=payload)
                 logger.info("Video sent to WhatsApp")
@@ -132,22 +143,45 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in forward_message: {str(e)}")
 
+async def post_init(application: Application) -> None:
+    """Initialization"""
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook deleted and ready for polling")
+
 def run_bot():
     """Run the Telegram bot in its own event loop"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = Application.builder() \
+        .token(TELEGRAM_BOT_TOKEN) \
+        .post_init(post_init) \
+        .build()
+    
     application.add_handler(MessageHandler(filters.ALL, forward_message))
     
     # Disable signal handling since we're not in main thread
-    application.run_polling(close_loop=False, stop_signals=[])
+    application.run_polling(
+        close_loop=False,
+        stop_signals=[],
+        drop_pending_updates=True
+    )
 
 if __name__ == '__main__':
-    # Start Telegram bot in a separate thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    # Check if another instance is already running
+    if os.environ.get("_BOT_RUNNING") == "1":
+        logger.error("Another bot instance is already running")
+        exit(1)
     
-    # Start Flask server
-    logger.info("Starting Flask server...")
-    app.run(host='0.0.0.0', port=8000, use_reloader=False)
+    os.environ["_BOT_RUNNING"] = "1"
+    
+    try:
+        # Start Telegram bot in a separate thread
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        
+        # Start Flask server
+        logger.info("Starting Flask server...")
+        app.run(host='0.0.0.0', port=8000, use_reloader=False)
+    finally:
+        os.environ["_BOT_RUNNING"] = "0"

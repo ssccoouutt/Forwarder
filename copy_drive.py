@@ -68,29 +68,33 @@ def is_youtube_url(text):
 
 def handle_youtube_request(phone, url):
     try:
-        send_message(phone, "⏳ Downloading video... (3-5 minutes for HD)")
+        send_message(phone, "⏳ Downloading video... (this may take a few minutes)")
         
-        file_path, title = download_youtube_video(url)
-        if not file_path:
-            raise Exception("Failed to download video")
+        # Create a temporary directory for downloads
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path, title = download_youtube_video(url, temp_dir)
+            if not file_path or not os.path.exists(file_path):
+                raise Exception("Failed to download video or file not found")
 
-        file_size = os.path.getsize(file_path)
-        logger.info(f"Downloaded: {title} ({file_size/1024/1024:.2f}MB)")
-        
-        send_video(phone, file_path, f"🎬 {title}")
-        os.remove(file_path)
+            file_size = os.path.getsize(file_path)
+            logger.info(f"Downloaded: {title} ({file_size/1024/1024:.2f}MB)")
+            
+            send_video(phone, file_path, f"🎬 {title}")
         
         return jsonify({"status": "success"})
 
     except Exception as e:
         logger.error(f"DOWNLOAD FAILED: {str(e)}")
-        send_message(phone, f"❌ Error: {str(e)}\nTry a different video or try again later")
+        error_msg = f"❌ Error: {str(e)}"
+        if "No such file or directory" in str(e):
+            error_msg = "❌ Failed to process video. YouTube may be blocking the download. Try again later."
+        send_message(phone, error_msg)
         return jsonify({"status": "error"}), 500
 
-def download_youtube_video(url):
+def download_youtube_video(url, temp_dir):
     ydl_opts = {
-        'format': 'best[filesize<20M]',
-        'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
+        'format': 'best',
+        'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
         'quiet': False,
         'extract_flat': False,
         'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
@@ -101,7 +105,11 @@ def download_youtube_video(url):
             'youtube': {
                 'skip': ['hls', 'dash', 'translated_subs']
             }
-        }
+        },
+        'postprocessors': [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4'
+        }]
     }
     
     try:
@@ -111,6 +119,13 @@ def download_youtube_video(url):
                 raise Exception("Failed to extract video info")
                 
             file_path = ydl.prepare_filename(info)
+            
+            # Ensure the file exists and has content
+            if not os.path.exists(file_path):
+                raise Exception("Downloaded file not found")
+            if os.path.getsize(file_path) == 0:
+                raise Exception("Downloaded file is empty")
+                
             return file_path, info['title']
             
     except Exception as e:
@@ -152,5 +167,5 @@ def send_video(phone, file_path, caption="", retries=3):
     return None
 
 if __name__ == '__main__':
-    logger.info("Starting YouTube Downloader Service with cookies support...")
+    logger.info("Starting YouTube Downloader Service with improved file handling...")
     serve(app, host='0.0.0.0', port=8000)

@@ -1,3 +1,4 @@
 flask==2.3.2
 requests==2.31.0
-waitress==2.1.2  # Production WSGI server
+waitress==2.1.2
+yt-dlp==2023.11.16

@@ -1,6 +1,6 @@
 import requests
 import asyncio
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from flask import Flask, jsonify
 import logging
@@ -89,8 +89,8 @@ def run_bot():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL, forward_message))
     
-    # Disable signal handling since we're not in main thread
-    application.run_polling(close_loop=False, stop_signals=[])
+    logger.info("Starting Telegram bot polling...")
+    application.run_polling()
 
 if __name__ == '__main__':
     # Start Telegram bot in a separate thread
@@ -99,4 +99,4 @@ if __name__ == '__main__':
     
     # Start Flask server
     logger.info("Starting Flask server...")
-    app.run(host='0.0.0.0', port=8000, use_reloader=False)
+    app.run(host='0.0.0.0', port=8000)

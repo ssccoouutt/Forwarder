@@ -182,7 +182,8 @@ def send_message(phone, text, retries=3):
         try:
             response = requests.post(
                 f"{BASE_URL}/messages/chat",
-                data={'token': TOKEN, 'to': phone, 'body': text},
+                params={'token': TOKEN},  # Send token as GET parameter
+                data={'to': phone, 'body': text},
                 timeout=15
             ).json()
             if response.get('sent'):
@@ -201,7 +202,8 @@ def send_video(phone, file_path, caption="", retries=3):
             with open(file_path, 'rb') as video_file:
                 response = requests.post(
                     f"{BASE_URL}/messages/video",
-                    data={'token': TOKEN, 'to': phone, 'caption': caption},
+                    params={'token': TOKEN},  # Send token as GET parameter
+                    data={'to': phone, 'caption': caption},
                     files={'video': video_file},
                     timeout=300
                 ).json()

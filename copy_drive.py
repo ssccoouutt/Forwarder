@@ -6,6 +6,7 @@ import tempfile
 import os
 import re
 import time
+import subprocess
 from yt_dlp import YoutubeDL
 
 app = Flask(__name__)
@@ -17,6 +18,7 @@ INSTANCE_ID = "instance116714"
 TOKEN = "j0253a3npbpb7ikw"
 BASE_URL = f"https://api.ultramsg.com/{INSTANCE_ID}"
 COOKIES_FILE = "cookies.txt"  # Path to cookies file
+MAX_RETRIES = 3
 
 @app.route('/')
 def health_check():
@@ -72,44 +74,52 @@ def handle_youtube_request(phone, url):
         
         # Create a temporary directory for downloads
         with tempfile.TemporaryDirectory() as temp_dir:
-            file_path, title = download_youtube_video(url, temp_dir)
+            file_path = download_youtube_video(url, temp_dir)
             if not file_path or not os.path.exists(file_path):
                 raise Exception("Failed to download video or file not found")
 
             file_size = os.path.getsize(file_path)
-            logger.info(f"Downloaded: {title} ({file_size/1024/1024:.2f}MB)")
+            logger.info(f"Downloaded: {file_path} ({file_size/1024/1024:.2f}MB)")
             
-            send_video(phone, file_path, f"🎬 {title}")
+            # Check if file needs compression (WhatsApp limit is ~16MB)
+            if file_size > 15 * 1024 * 1024:  # 15MB
+                send_message(phone, "📦 File is large, compressing...")
+                compressed_path = os.path.join(temp_dir, "compressed.mp4")
+                if compress_video(file_path, compressed_path):
+                    file_path = compressed_path
+                    logger.info(f"Compressed to: {os.path.getsize(file_path)/1024/1024:.2f}MB")
+                else:
+                    logger.warning("Compression failed, sending original")
+
+            send_video(phone, file_path, "🎬 Your YouTube Video")
         
         return jsonify({"status": "success"})
 
     except Exception as e:
         logger.error(f"DOWNLOAD FAILED: {str(e)}")
-        error_msg = f"❌ Error: {str(e)}"
-        if "No such file or directory" in str(e):
-            error_msg = "❌ Failed to process video. YouTube may be blocking the download. Try again later."
+        error_msg = "❌ Failed to download video. YouTube may be blocking the download. Try again later."
+        if "HTTP Error 403" in str(e):
+            error_msg = "❌ YouTube blocked this download. Try a different video."
         send_message(phone, error_msg)
         return jsonify({"status": "error"}), 500
 
 def download_youtube_video(url, temp_dir):
     ydl_opts = {
-        'format': 'best',
-        'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+        'format': 'best[height<=720]',  # Limit to 720p to reduce size
+        'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),  # Use video ID as filename
         'quiet': False,
-        'extract_flat': False,
         'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
         'ignoreerrors': True,
-        'retries': 3,
+        'retries': MAX_RETRIES,
         'socket_timeout': 30,
         'extractor_args': {
             'youtube': {
                 'skip': ['hls', 'dash', 'translated_subs']
             }
         },
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4'
-        }]
+        'postprocessor_args': {
+            'ffmpeg': ['-b:v', '1500k']  # Set target video bitrate
+        }
     }
     
     try:
@@ -126,11 +136,28 @@ def download_youtube_video(url, temp_dir):
             if os.path.getsize(file_path) == 0:
                 raise Exception("Downloaded file is empty")
                 
-            return file_path, info['title']
+            return file_path
             
     except Exception as e:
         logger.error(f"YT-DLP ERROR: {str(e)}")
-        raise Exception("YouTube download failed. The video may be restricted or unavailable")
+        raise Exception(f"YouTube download failed: {str(e)}")
+
+def compress_video(input_path, output_path):
+    try:
+        command = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c:v', 'libx264',
+            '-crf', '28',  # Higher CRF = more compression
+            '-preset', 'fast',
+            '-c:a', 'copy',  # Keep original audio
+            output_path
+        ]
+        subprocess.run(command, check=True, capture_output=True)
+        return os.path.exists(output_path)
+    except Exception as e:
+        logger.error(f"COMPRESSION ERROR: {str(e)}")
+        return False
 
 def send_message(phone, text, retries=3):
     for attempt in range(retries):
@@ -167,5 +194,5 @@ def send_video(phone, file_path, caption="", retries=3):
     return None
 
 if __name__ == '__main__':
-    logger.info("Starting YouTube Downloader Service with improved file handling...")
+    logger.info("Starting YouTube Downloader Service with improved download logic...")
     serve(app, host='0.0.0.0', port=8000)

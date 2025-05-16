@@ -8,7 +8,7 @@ import threading
 import re
 import os
 
-# Initialize Flask app for Koyeb health checks
+# Initialize Flask app
 app = Flask(__name__)
 
 @app.route('/')
@@ -20,10 +20,11 @@ TELEGRAM_BOT_TOKEN = "7346090805:AAHUtCp7o7Kd2Ae9ybdJuzb7lRiHl7vyrn8"
 SOURCE_CHANNEL = "@Source069"
 DESTINATION_CHANNEL = "@Destination07"
 
-# UltraMSG Configuration
+# WhatsApp Configuration
 WHATSAPP_API_TOKEN = "j0253a3npbpb7ikw"
 WHATSAPP_INSTANCE_ID = "instance116714"
 WHATSAPP_NUMBER = "923247220362"
+WHATSAPP_GROUP_ID = "120363140590753276"  # Added WhatsApp group ID
 ULTRA_MSG_BASE_URL = f"https://api.ultramsg.com/{WHATSAPP_INSTANCE_ID}"
 
 # Configure logging
@@ -33,33 +34,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def clean_escapes(text):
-    """Remove unnecessary escape characters from Telegram's MarkdownV2"""
+def clean_whatsapp_text(text):
+    """Clean text for WhatsApp by removing Telegram-specific escapes"""
     if not text:
         return text
-    # Remove escapes before these characters: . - _ * [ ] ( ) ~ ` > # + = | { } ! 
+    # Remove escapes before these characters: . - _ * [ ] ( ) ~ ` > # + = | { } !
     return re.sub(r'\\([._*\[\]()~`>#+=|{}!-])', r'\1', text)
 
-def convert_telegram_to_whatsapp(text):
+def convert_to_whatsapp_formatting(text):
     """Convert Telegram formatting to WhatsApp formatting"""
     if not text:
         return text
     
-    # First clean escape characters
-    text = clean_escapes(text)
+    text = clean_whatsapp_text(text)
     
-    # Handle quotes (remove formatting for WhatsApp)
-    text = re.sub(r'^>\s?(.*)$', r'\1', text, flags=re.MULTILINE)
-    
-    # Replace formatting
+    # Replace formatting while preserving links
     replacements = [
-        (r'<b>(.*?)</b>', r'*\1*'),      # bold
+        (r'\[([^\]]+)\]\(([^)]+)\)', r'\1 \2'),  # Convert links [text](url) to text url
+        (r'<b>(.*?)</b>', r'*\1*'),              # bold
         (r'<strong>(.*?)</strong>', r'*\1*'),
-        (r'<i>(.*?)</i>', r'_\1_'),      # italic
+        (r'<i>(.*?)</i>', r'_\1_'),              # italic
         (r'<em>(.*?)</em>', r'_\1_'),
-        (r'<u>(.*?)</u>', r'~\1~'),      # underline
-        (r'<s>(.*?)</s>', r'~\1~'),      # strikethrough
-        (r'<del>(.*?)</del>', r'~\1~'),
+        (r'<u>(.*?)</u>', r'~\1~'),              # underline
+        (r'<s>(.*?)</s>', r'~\1~'),              # strikethrough
         (r'<code>(.*?)</code>', r'```\1```'),
         (r'<pre>(.*?)</pre>', r'```\1```')
     ]
@@ -69,14 +66,15 @@ def convert_telegram_to_whatsapp(text):
     
     return text
 
-async def send_copy_to_destination(context, message):
-    """Send a copy of the message to destination channel with original formatting"""
+async def send_to_destination(context, message):
+    """Send exact copy to destination channel (no forwarding)"""
     try:
         if message.text:
             await context.bot.send_message(
                 chat_id=DESTINATION_CHANNEL,
                 text=message.text_markdown_v2 or message.text,
-                parse_mode='MarkdownV2'
+                parse_mode='MarkdownV2',
+                disable_web_page_preview=True
             )
         elif message.photo:
             photo = message.photo[-1]
@@ -95,9 +93,51 @@ async def send_copy_to_destination(context, message):
                 caption=message.caption_markdown_v2 if message.caption else None,
                 parse_mode='MarkdownV2'
             )
-        logger.info("Message copied to destination channel with original formatting")
+        logger.info("Message copied to destination channel")
     except Exception as e:
-        logger.error(f"Error sending copy to destination: {str(e)}")
+        logger.error(f"Error sending to destination: {str(e)}")
+
+async def send_to_whatsapp(content, is_media=False, media_url=None, media_type=None):
+    """Send message to both WhatsApp account and group"""
+    try:
+        # Send to WhatsApp account
+        account_payload = {
+            "token": WHATSAPP_API_TOKEN,
+            "to": WHATSAPP_NUMBER,
+        }
+        
+        # Send to WhatsApp group
+        group_payload = {
+            "token": WHATSAPP_API_TOKEN,
+            "to": WHATSAPP_GROUP_ID,
+        }
+        
+        if is_media:
+            account_payload.update({
+                media_type: media_url,
+                "caption": content
+            })
+            group_payload.update({
+                media_type: media_url,
+                "caption": content
+            })
+            
+            endpoint = f"messages/{media_type}"
+        else:
+            account_payload["body"] = content
+            group_payload["body"] = content
+            endpoint = "messages/chat"
+        
+        # Send to account
+        requests.post(f"{ULTRA_MSG_BASE_URL}/{endpoint}", data=account_payload)
+        
+        # Send to group (with slight delay to avoid rate limiting)
+        await asyncio.sleep(1)
+        requests.post(f"{ULTRA_MSG_BASE_URL}/{endpoint}", data=group_payload)
+        
+        logger.info(f"Content sent to WhatsApp {'group and account' if WHATSAPP_GROUP_ID else 'account'}")
+    except Exception as e:
+        logger.error(f"Error sending to WhatsApp: {str(e)}")
 
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -105,48 +145,34 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message = update.channel_post
             logger.info(f"New message received: {message.message_id}")
             
-            # Send copy to destination channel with original formatting
-            await send_copy_to_destination(context, message)
+            # 1. Send exact copy to destination Telegram channel
+            await send_to_destination(context, message)
             
-            # Prepare WhatsApp content
-            whatsapp_text = ""
+            # 2. Prepare and send to WhatsApp
+            whatsapp_content = ""
             if message.text:
-                whatsapp_text = convert_telegram_to_whatsapp(message.text_markdown_v2 or message.text)
+                whatsapp_content = convert_to_whatsapp_formatting(message.text_markdown_v2 or message.text)
+                await send_to_whatsapp(whatsapp_content)
             elif message.caption:
-                whatsapp_text = convert_telegram_to_whatsapp(message.caption_markdown_v2 or message.caption)
+                whatsapp_content = convert_to_whatsapp_formatting(message.caption_markdown_v2 or message.caption)
             
-            # Send to WhatsApp
-            if message.text:
-                payload = {
-                    "token": WHATSAPP_API_TOKEN,
-                    "to": WHATSAPP_NUMBER,
-                    "body": whatsapp_text
-                }
-                requests.post(f"{ULTRA_MSG_BASE_URL}/messages/chat", data=payload)
-                logger.info("Text sent to WhatsApp")
-            
-            elif message.photo:
+            if message.photo:
                 photo = message.photo[-1]
                 file = await photo.get_file()
-                payload = {
-                    "token": WHATSAPP_API_TOKEN,
-                    "to": WHATSAPP_NUMBER,
-                    "image": file.file_path,
-                    "caption": whatsapp_text if whatsapp_text else None
-                }
-                requests.post(f"{ULTRA_MSG_BASE_URL}/messages/image", data=payload)
-                logger.info("Photo sent to WhatsApp")
-            
+                await send_to_whatsapp(
+                    whatsapp_content,
+                    is_media=True,
+                    media_url=file.file_path,
+                    media_type="image"
+                )
             elif message.video:
                 file = await message.video.get_file()
-                payload = {
-                    "token": WHATSAPP_API_TOKEN,
-                    "to": WHATSAPP_NUMBER,
-                    "video": file.file_path,
-                    "caption": whatsapp_text if whatsapp_text else None
-                }
-                requests.post(f"{ULTRA_MSG_BASE_URL}/messages/video", data=payload)
-                logger.info("Video sent to WhatsApp")
+                await send_to_whatsapp(
+                    whatsapp_content,
+                    is_media=True,
+                    media_url=file.file_path,
+                    media_type="video"
+                )
 
     except Exception as e:
         logger.error(f"Error in forward_message: {str(e)}")
@@ -154,10 +180,10 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application) -> None:
     """Initialization"""
     await application.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook deleted and ready for polling")
+    logger.info("Ready for polling")
 
 def run_bot():
-    """Run the Telegram bot in its own event loop"""
+    """Run the Telegram bot"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -168,7 +194,6 @@ def run_bot():
     
     application.add_handler(MessageHandler(filters.ALL, forward_message))
     
-    # Disable signal handling since we're not in main thread
     application.run_polling(
         close_loop=False,
         stop_signals=[],
@@ -176,7 +201,7 @@ def run_bot():
     )
 
 if __name__ == '__main__':
-    # Check if another instance is already running
+    # Single instance check
     if os.environ.get("_BOT_RUNNING") == "1":
         logger.error("Another bot instance is already running")
         exit(1)
@@ -184,11 +209,11 @@ if __name__ == '__main__':
     os.environ["_BOT_RUNNING"] = "1"
     
     try:
-        # Start Telegram bot in a separate thread
+        # Start bot thread
         bot_thread = threading.Thread(target=run_bot, daemon=True)
         bot_thread.start()
         
-        # Start Flask server
+        # Start Flask
         logger.info("Starting Flask server...")
         app.run(host='0.0.0.0', port=8000, use_reloader=False)
     finally:

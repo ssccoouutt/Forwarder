@@ -35,9 +35,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def clean_whatsapp_text(text):
-    """Clean text for WhatsApp while preserving essential formatting"""
+    """Clean text for WhatsApp with special handling for blockquotes"""
     if not text:
         return text
+    
+    # First convert blockquotes to italics
+    text = re.sub(r'^>\s?(.*)$', r'_\1_', text, flags=re.MULTILINE)
     
     # Remove ALL Telegram escape characters (they're not needed for WhatsApp)
     text = re.sub(r'\\([^a-zA-Z0-9])', r'\1', text)
@@ -48,16 +51,13 @@ def clean_whatsapp_text(text):
     text = re.sub(r'~~(.*?)~~', r'~\1~', text)      # strikethrough
     text = re.sub(r'`(.*?)`', r'```\1```', text)    # code
     
-    # Remove any remaining HTML tags
-    text = re.sub(r'<[^>]+>', '', text)
-    
     # Clean up multiple newlines
     text = re.sub(r'\n{3,}', '\n\n', text)
     
     return text.strip()
 
 async def send_to_destination(context, message):
-    """Send exact copy to destination channel (not forwarded)"""
+    """Send exact copy to destination channel with original formatting"""
     try:
         if message.text:
             await context.bot.send_message(

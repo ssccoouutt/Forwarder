@@ -162,6 +162,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not message:
             return
             
+        # Only process private chats (direct messages to bot)
+        if message.chat.type != "private":
+            return
+            
         logger.info(f"New message received from {message.from_user.id}")
         
         # 1. Send to Telegram channel
@@ -188,8 +192,9 @@ def run_bot():
         .post_init(post_init) \
         .build()
     
-    # Only listen to private messages (direct chats)
-    app.add_handler(MessageHandler(filters.CHAT_TYPE.PRIVATE & ~filters.COMMAND, handle_message))
+    # Handle all messages except commands in private chats
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_message))
     
     app.run_polling(
         close_loop=False,

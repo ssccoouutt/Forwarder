@@ -40,18 +40,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def clean_whatsapp_text(text):
-    """Clean text for WhatsApp while preserving essential formatting"""
+    """Clean text for WhatsApp with enhanced formatting handling"""
     if not text:
         return text
     
     # Remove ALL Telegram escape characters
     text = re.sub(r'\\([^a-zA-Z0-9])', r'\1', text)
     
-    # Convert formatting
-    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)  # bold
-    text = re.sub(r'__(.*?)__', r'_\1_', text)      # italic
-    text = re.sub(r'~~(.*?)~~', r'~\1~', text)      # strikethrough
-    text = re.sub(r'`(.*?)`', r'```\1```', text)    # code
+    # Convert formatting with line-by-line processing
+    def format_lines(pattern, wrapper):
+        def replacer(match):
+            content = match.group(1)
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+            return '\n'.join([f'{wrapper}{line}{wrapper}' for line in lines])
+        return replacer
+    
+    # Apply formatting conversions with multiline support
+    text = re.sub(r'\*\*(.*?)\*\*', format_lines(r'\*\*(.*?)\*\*', '*'), text, flags=re.DOTALL)
+    text = re.sub(r'__(.*?)__', format_lines(r'__(.*?)__', '_'), text, flags=re.DOTALL)
+    text = re.sub(r'~~(.*?)~~', format_lines(r'~~(.*?)~~', '~'), text, flags=re.DOTALL)
+    text = re.sub(r'`(.*?)`', format_lines(r'`(.*?)`', '```'), text, flags=re.DOTALL)
     
     # Clean up whitespace
     text = re.sub(r'[ \t]+', ' ', text)
@@ -150,11 +158,11 @@ async def send_to_whatsapp(message):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        message = update.message or update.channel_post
+        message = update.message
         if not message:
             return
             
-        logger.info(f"New message received from {message.from_user.id if message.from_user else 'channel'}")
+        logger.info(f"New message received from {message.from_user.id}")
         
         # 1. Send to Telegram channel
         await send_to_destination(context, message)
@@ -180,7 +188,8 @@ def run_bot():
         .post_init(post_init) \
         .build()
     
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    # Only listen to private messages (direct chats)
+    app.add_handler(MessageHandler(filters.CHAT_TYPE.PRIVATE & ~filters.COMMAND, handle_message))
     
     app.run_polling(
         close_loop=False,

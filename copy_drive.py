@@ -40,26 +40,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def clean_whatsapp_text(text):
-    """Clean text for WhatsApp with enhanced formatting handling"""
+    """Clean text for WhatsApp while preserving essential formatting"""
     if not text:
         return text
     
     # Remove ALL Telegram escape characters
     text = re.sub(r'\\([^a-zA-Z0-9])', r'\1', text)
     
-    # Convert formatting with line-by-line processing
-    def format_lines(pattern, wrapper):
-        def replacer(match):
-            content = match.group(1)
-            lines = [line.strip() for line in content.split('\n') if line.strip()]
-            return '\n'.join([f'{wrapper}{line}{wrapper}' for line in lines])
-        return replacer
-    
-    # Apply formatting conversions with multiline support
-    text = re.sub(r'\*\*(.*?)\*\*', format_lines(r'\*\*(.*?)\*\*', '*'), text, flags=re.DOTALL)
-    text = re.sub(r'__(.*?)__', format_lines(r'__(.*?)__', '_'), text, flags=re.DOTALL)
-    text = re.sub(r'~~(.*?)~~', format_lines(r'~~(.*?)~~', '~'), text, flags=re.DOTALL)
-    text = re.sub(r'`(.*?)`', format_lines(r'`(.*?)`', '```'), text, flags=re.DOTALL)
+    # Convert formatting
+    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)  # bold
+    text = re.sub(r'__(.*?)__', r'_\1_', text)      # italic
+    text = re.sub(r'~~(.*?)~~', r'~\1~', text)      # strikethrough
+    text = re.sub(r'`(.*?)`', r'```\1```', text)    # code
     
     # Clean up whitespace
     text = re.sub(r'[ \t]+', ' ', text)
@@ -162,11 +154,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not message:
             return
             
-        # Only process private chats (direct messages to bot)
+        # Check if the message is from a private chat (not group/channel)
         if message.chat.type != "private":
+            logger.info(f"Ignoring non-private message from chat type: {message.chat.type}")
             return
             
-        logger.info(f"New message received from {message.from_user.id}")
+        logger.info(f"New private message received from {message.from_user.id}")
         
         # 1. Send to Telegram channel
         await send_to_destination(context, message)
@@ -192,9 +185,8 @@ def run_bot():
         .post_init(post_init) \
         .build()
     
-    # Handle all messages except commands in private chats
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_message))
+    # Only handle private messages (not commands)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
     
     app.run_polling(
         close_loop=False,

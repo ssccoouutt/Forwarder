@@ -154,7 +154,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not message:
             return
             
-        # Check if the message is from a private chat (not group/channel)
+        # Only process messages from private chats
         if message.chat.type != "private":
             logger.info(f"Ignoring non-private message from chat type: {message.chat.type}")
             return

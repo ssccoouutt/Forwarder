@@ -1,6 +1,6 @@
 import requests
 import asyncio
-from telegram import Update
+from telegram import Update, MessageEntity
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from flask import Flask, jsonify
 import logging
@@ -39,19 +39,97 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def clean_whatsapp_text(text):
-    """Clean text for WhatsApp while preserving essential formatting"""
+def adjust_entity_offsets(text, entities):
+    """Adjust entity offsets to account for multi-code-point characters"""
+    if not entities:
+        return entities
+    
+    # Create a mapping of UTF-16 code unit positions to character positions
+    char_pos = 0
+    utf16_pos = 0
+    pos_map = {}
+    
+    for char in text:
+        pos_map[utf16_pos] = char_pos
+        utf16_pos += len(char.encode('utf-16-le')) // 2
+        char_pos += 1
+    
+    # Adjust each entity's offset and length
+    adjusted_entities = []
+    for entity in entities:
+        start = pos_map.get(entity.offset, entity.offset)
+        end = pos_map.get(entity.offset + entity.length, entity.offset + entity.length)
+        
+        # Create new entity with adjusted positions
+        new_entity = MessageEntity(
+            type=entity.type,
+            offset=start,
+            length=end - start,
+            url=entity.url,
+            user=entity.user,
+            language=entity.language,
+            custom_emoji_id=entity.custom_emoji_id
+        )
+        adjusted_entities.append(new_entity)
+    
+    return adjusted_entities
+
+def clean_whatsapp_text(text, entities=None):
+    """Convert Telegram formatting to WhatsApp formatting with proper handling"""
     if not text:
         return text
     
-    # Remove ALL Telegram escape characters
-    text = re.sub(r'\\([^a-zA-Z0-9])', r'\1', text)
-    
-    # Convert formatting
-    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)  # bold
-    text = re.sub(r'__(.*?)__', r'_\1_', text)      # italic
-    text = re.sub(r'~~(.*?)~~', r'~\1~', text)      # strikethrough
-    text = re.sub(r'`(.*?)`', r'```\1```', text)    # code
+    # If we have entities, use them for more accurate formatting
+    if entities:
+        entities = adjust_entity_offsets(text, entities)
+        
+        # Convert to list for character-level manipulation
+        text_list = list(text)
+        
+        # Process each entity type separately
+        entity_types = {
+            MessageEntity.BOLD: ('*', '*'),
+            MessageEntity.ITALIC: ('_', '_'),
+            MessageEntity.STRIKETHROUGH: ('~', '~'),
+            MessageEntity.CODE: ('```', '```'),
+            MessageEntity.PRE: ('```\n', '\n```')
+        }
+        
+        # Sort entities by offset in reverse order to avoid position shifting
+        for entity in sorted(entities, key=lambda e: -e.offset):
+            if entity.type in entity_types:
+                prefix, suffix = entity_types[entity.type]
+                start = entity.offset
+                end = start + entity.length
+                
+                # Extract the content
+                content = text[start:end]
+                
+                # Special handling for PRE to maintain newlines
+                if entity.type == MessageEntity.PRE:
+                    replacement = f"{prefix}{content}{suffix}"
+                else:
+                    # For other types, process line by line
+                    lines = content.split('\n')
+                    wrapped_lines = []
+                    for line in lines:
+                        if line.strip():  # Only wrap non-empty lines
+                            wrapped_lines.append(f"{prefix}{line.strip()}{suffix}")
+                        else:  # Preserve empty lines
+                            wrapped_lines.append('')
+                    replacement = '\n'.join(wrapped_lines)
+                
+                # Replace the original section
+                text_list[start:end] = replacement
+        
+        text = ''.join(text_list)
+    else:
+        # Fallback to regex processing if no entities available
+        text = re.sub(r'\\([^a-zA-Z0-9])', r'\1', text)  # Remove escapes
+        text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)   # bold
+        text = re.sub(r'__(.*?)__', r'_\1_', text)       # italic
+        text = re.sub(r'~~(.*?)~~', r'~\1~', text)       # strikethrough
+        text = re.sub(r'`(.*?)`', r'```\1```', text)     # code
     
     # Clean up whitespace
     text = re.sub(r'[ \t]+', ' ', text)
@@ -94,14 +172,21 @@ async def send_to_whatsapp(message):
     try:
         # Prepare content
         whatsapp_text = ""
+        entities = None
+        
         if message.text:
-            whatsapp_text = clean_whatsapp_text(message.text_markdown_v2 or message.text)
+            whatsapp_text = message.text
+            entities = message.entities
         elif message.caption:
-            whatsapp_text = clean_whatsapp_text(message.caption_markdown_v2 or message.caption)
+            whatsapp_text = message.caption
+            entities = message.caption_entities
         
         if not whatsapp_text:
             return
             
+        # Clean and format the text
+        formatted_text = clean_whatsapp_text(whatsapp_text, entities)
+        
         # Send to all targets (account + groups)
         targets = [WHATSAPP_NUMBER] + WHATSAPP_GROUPS
         
@@ -112,7 +197,7 @@ async def send_to_whatsapp(message):
                     data={
                         "token": WHATSAPP_API_TOKEN,
                         "to": target,
-                        "body": whatsapp_text
+                        "body": formatted_text
                     }
                 )
         
@@ -126,7 +211,7 @@ async def send_to_whatsapp(message):
                         "token": WHATSAPP_API_TOKEN,
                         "to": target,
                         "image": file.file_path,
-                        "caption": whatsapp_text
+                        "caption": formatted_text
                     }
                 )
         
@@ -139,7 +224,7 @@ async def send_to_whatsapp(message):
                         "token": WHATSAPP_API_TOKEN,
                         "to": target,
                         "video": file.file_path,
-                        "caption": whatsapp_text
+                        "caption": formatted_text
                     }
                 )
         

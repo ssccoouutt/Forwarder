@@ -20,8 +20,8 @@ TELEGRAM_BOT_TOKEN = "7346090805:AAHUtCp7o7Kd2Ae9ybdJuzb7lRiHl7vyrn8"
 DESTINATION_CHANNEL = "-1001287988079"  # Your private channel
 
 # WhatsApp Configuration
-WHATSAPP_API_TOKEN = "j0253a3npbpb7ikw"
-WHATSAPP_INSTANCE_ID = "instance116714"
+WHATSAPP_API_TOKEN = "uo7ny4ky1m9ol4md"
+WHATSAPP_INSTANCE_ID = "instance124468"
 WHATSAPP_NUMBER = "923247220362"  # Your linked number
 WHATSAPP_GROUPS = [
     "120363140590753276@g.us",  # Original group

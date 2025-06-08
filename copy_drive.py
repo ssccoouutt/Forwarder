@@ -1,6 +1,7 @@
 import requests
 import asyncio
 from telegram import Update, MessageEntity
+from telegram.constants import ParseMode
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from flask import Flask, jsonify
 import logging
@@ -74,6 +75,110 @@ def adjust_entity_offsets(text, entities):
     
     return adjusted_entities
 
+def filter_entities(entities):
+    """Filter to only supported formatting entities"""
+    allowed_types = {
+        MessageEntity.BOLD,
+        MessageEntity.ITALIC,
+        MessageEntity.CODE,
+        MessageEntity.PRE,
+        MessageEntity.UNDERLINE,
+        MessageEntity.STRIKETHROUGH,
+        MessageEntity.TEXT_LINK,
+        MessageEntity.SPOILER,
+        "blockquote"
+    }
+    return [e for e in entities if getattr(e, 'type', None) in allowed_types] if entities else []
+
+def apply_telegram_formatting(text, entities):
+    """Apply all formatting with proper nesting for Telegram"""
+    if not text:
+        return text
+    
+    # Convert to list for character-level manipulation
+    chars = list(text)
+    text_length = len(chars)
+    
+    # Sort entities by offset (reversed for proper insertion)
+    sorted_entities = sorted(entities or [], key=lambda e: -e.offset)
+    
+    # Entity processing map
+    entity_tags = {
+        MessageEntity.BOLD: ('<b>', '</b>'),
+        MessageEntity.ITALIC: ('<i>', '</i>'),
+        MessageEntity.UNDERLINE: ('<u>', '</u>'),
+        MessageEntity.STRIKETHROUGH: ('<s>', '</s>'),
+        MessageEntity.SPOILER: ('<tg-spoiler>', '</tg-spoiler>'),
+        MessageEntity.CODE: ('<code>', '</code>'),
+        MessageEntity.PRE: ('<pre>', '</pre>'),
+        MessageEntity.TEXT_LINK: (lambda e: f'<a href="{e.url}">', '</a>'),
+        "blockquote": ('<blockquote>', '</blockquote>')
+    }
+    
+    for entity in sorted_entities:
+        entity_type = getattr(entity, 'type', None)
+        if entity_type not in entity_tags:
+            continue
+            
+        start_tag, end_tag = entity_tags[entity_type]
+        if callable(start_tag):
+            start_tag = start_tag(entity)
+            
+        start = entity.offset
+        end = start + entity.length
+        
+        # Validate positions
+        if start >= text_length or end > text_length:
+            continue
+            
+        # Apply formatting
+        before = ''.join(chars[:start])
+        content = ''.join(chars[start:end])
+        after = ''.join(chars[end:])
+        
+        # Special handling for blockquotes to prevent nesting issues
+        if entity_type == "blockquote":
+            content = content.replace('<b>', '').replace('</b>', '')
+            content = content.replace('<i>', '').replace('</i>', '')
+        
+        chars = list(before + start_tag + content + end_tag + after)
+        text_length = len(chars)
+    
+    # Handle manual blockquotes (lines starting with >)
+    formatted_text = ''.join(chars)
+    if ">" in formatted_text:
+        formatted_text = formatted_text.replace("&gt;", ">")
+        lines = formatted_text.split('\n')
+        formatted_lines = []
+        in_blockquote = False
+        
+        for line in lines:
+            if line.startswith('>'):
+                if not in_blockquote:
+                    formatted_lines.append('<blockquote>')
+                    in_blockquote = True
+                formatted_lines.append(line[1:].strip())
+            else:
+                if in_blockquote:
+                    formatted_lines.append('</blockquote>')
+                    in_blockquote = False
+                formatted_lines.append(line)
+        
+        if in_blockquote:
+            formatted_lines.append('</blockquote>')
+        
+        formatted_text = '\n'.join(formatted_lines)
+    
+    # Final HTML escaping (except for our tags)
+    formatted_text = formatted_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Re-insert our HTML tags
+    html_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'tg-spoiler', 'blockquote']
+    for tag in html_tags:
+        formatted_text = formatted_text.replace(f'&lt;{tag}&gt;', f'<{tag}>').replace(f'&lt;/{tag}&gt;', f'</{tag}>')
+    
+    return formatted_text
+
 def clean_whatsapp_text(text, entities=None):
     """Convert Telegram formatting to WhatsApp formatting with proper handling"""
     if not text:
@@ -138,13 +243,34 @@ def clean_whatsapp_text(text, entities=None):
     return text.strip()
 
 async def send_to_destination(context, message):
-    """Send to private Telegram channel"""
+    """Send to private Telegram channel with proper formatting"""
     try:
+        # Prepare content
+        telegram_text = ""
+        entities = None
+        
+        if message.text:
+            telegram_text = message.text
+            entities = message.entities
+        elif message.caption:
+            telegram_text = message.caption
+            entities = message.caption_entities
+        
+        # Apply Telegram formatting
+        if telegram_text:
+            filtered_entities = filter_entities(entities)
+            adjusted_entities = adjust_entity_offsets(telegram_text, filtered_entities)
+            formatted_text = apply_telegram_formatting(telegram_text, adjusted_entities)
+        else:
+            formatted_text = None
+
+        # Send based on message type
         if message.text:
             await context.bot.send_message(
                 chat_id=DESTINATION_CHANNEL,
-                text=message.text_markdown_v2 or message.text,
-                parse_mode='MarkdownV2'
+                text=formatted_text or message.text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
             )
         elif message.photo:
             photo = message.photo[-1]
@@ -152,23 +278,23 @@ async def send_to_destination(context, message):
             await context.bot.send_photo(
                 chat_id=DESTINATION_CHANNEL,
                 photo=file.file_id,
-                caption=message.caption_markdown_v2 if message.caption else None,
-                parse_mode='MarkdownV2'
+                caption=formatted_text if message.caption else None,
+                parse_mode=ParseMode.HTML
             )
         elif message.video:
             file = await message.video.get_file()
             await context.bot.send_video(
                 chat_id=DESTINATION_CHANNEL,
                 video=file.file_id,
-                caption=message.caption_markdown_v2 if message.caption else None,
-                parse_mode='MarkdownV2'
+                caption=formatted_text if message.caption else None,
+                parse_mode=ParseMode.HTML
             )
         logger.info("Message sent to Telegram channel")
     except Exception as e:
         logger.error(f"Telegram send error: {str(e)}")
 
 async def send_to_whatsapp(message):
-    """Send to all WhatsApp targets"""
+    """Send to all WhatsApp targets (unchanged)"""
     try:
         # Prepare content
         whatsapp_text = ""
@@ -246,10 +372,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         logger.info(f"New private message received from {message.from_user.id}")
         
-        # 1. Send to Telegram channel
+        # 1. Send to Telegram channel with new formatting
         await send_to_destination(context, message)
         
-        # 2. Send to all WhatsApp targets
+        # 2. Send to all WhatsApp targets (unchanged)
         await send_to_whatsapp(message)
 
     except Exception as e:

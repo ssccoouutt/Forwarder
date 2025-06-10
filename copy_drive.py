@@ -17,7 +17,7 @@ def health_check():
     return jsonify({"status": "healthy"})
 
 # Telegram Configuration
-TELEGRAM_BOT_TOKEN = "7346090805:AAHUtCp7o7Kd2Ae9ybdJuzb7lRiHl7vyrn8"
+TELEGRAM_BOT_TOKEN = "7346090805:AAGLewHzlJqQjeaVJVDPpbJK1Pzuot2DZNQ"
 DESTINATION_CHANNEL = "-1001287988079"  # Your private channel
 
 # WhatsApp Configuration

@@ -2,12 +2,15 @@ import requests
 import asyncio
 from telegram import Update, MessageEntity
 from telegram.constants import ParseMode
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 from flask import Flask, jsonify
 import logging
 import threading
 import re
 import os
+import time
+import heapq
+from datetime import datetime, timedelta
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -39,6 +42,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Scheduler configuration
+QUEUE_LOCK = threading.Lock()
+MESSAGE_QUEUE = []
+NEXT_SEND_TIME = time.time()
+DELAY_HOURS = 4
 
 def adjust_entity_offsets(text, entities):
     """Adjust entity offsets to account for multi-code-point characters"""
@@ -294,7 +303,7 @@ async def send_to_destination(context, message):
         logger.error(f"Telegram send error: {str(e)}")
 
 async def send_to_whatsapp(message):
-    """Send to all WhatsApp targets (unchanged)"""
+    """Send to all WhatsApp targets"""
     try:
         # Prepare content
         whatsapp_text = ""
@@ -359,6 +368,68 @@ async def send_to_whatsapp(message):
     except Exception as e:
         logger.error(f"WhatsApp send error: {str(e)}")
 
+def get_message_preview(message):
+    """Get first 30 characters of message text for identification"""
+    if message.text:
+        return message.text[:30] + ("..." if len(message.text) > 30 else "")
+    elif message.caption:
+        return message.caption[:30] + ("..." if len(message.caption) > 30 else "")
+    return "Media message"
+
+def schedule_message(update, context, message):
+    """Add message to scheduling queue with delay"""
+    global NEXT_SEND_TIME
+    
+    with QUEUE_LOCK:
+        # Calculate send time (4 hours after last scheduled message)
+        send_time = NEXT_SEND_TIME if NEXT_SEND_TIME > time.time() else time.time()
+        if MESSAGE_QUEUE:
+            send_time = max(send_time, heapq.nlargest(1, MESSAGE_QUEUE)[0][0])
+        send_time += DELAY_HOURS * 3600
+        NEXT_SEND_TIME = send_time
+        
+        # Create message data package
+        message_data = {
+            'update': update,
+            'context': context,
+            'message': message,
+            'preview': get_message_preview(message),
+            'send_time': send_time
+        }
+        
+        # Add to priority queue (min-heap by send time)
+        heapq.heappush(MESSAGE_QUEUE, (send_time, message_data))
+        logger.info(f"Scheduled message for {datetime.fromtimestamp(send_time)}")
+        
+        # Notify user
+        send_time_str = datetime.fromtimestamp(send_time).strftime("%Y-%m-%d %H:%M:%S")
+        asyncio.run_coroutine_threadsafe(
+            context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=f"📅 Post scheduled for delivery at {send_time_str}"
+            ),
+            context.bot._loop
+        )
+
+async def process_queue():
+    """Process scheduled messages from the queue"""
+    while True:
+        now = time.time()
+        with QUEUE_LOCK:
+            # Process all messages that are due
+            while MESSAGE_QUEUE and MESSAGE_QUEUE[0][0] <= now:
+                send_time, message_data = heapq.heappop(MESSAGE_QUEUE)
+                message = message_data['message']
+                context = message_data['context']
+                
+                # Send to Telegram and WhatsApp
+                await send_to_destination(context, message)
+                await send_to_whatsapp(message)
+                logger.info(f"Sent scheduled message originally received at {message.date}")
+        
+        # Wait before checking again
+        await asyncio.sleep(30)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.message
@@ -372,18 +443,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         logger.info(f"New private message received from {message.from_user.id}")
         
-        # 1. Send to Telegram channel with new formatting
-        await send_to_destination(context, message)
-        
-        # 2. Send to all WhatsApp targets (unchanged)
-        await send_to_whatsapp(message)
+        # Check if message is forwarded
+        if message.forward_from or message.forward_from_chat:
+            # Schedule forwarded messages with delay
+            schedule_message(update, context, message)
+        else:
+            # Direct messages - send immediately
+            await send_to_destination(context, message)
+            await send_to_whatsapp(message)
 
     except Exception as e:
         logger.error(f"Processing error: {str(e)}")
 
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show scheduled posts in the queue"""
+    try:
+        with QUEUE_LOCK:
+            if not MESSAGE_QUEUE:
+                await update.message.reply_text("📭 No scheduled posts in queue")
+                return
+                
+            response = "⏱ Scheduled Posts:\n\n"
+            for idx, (send_time, msg_data) in enumerate(heapq.nsmallest(10, MESSAGE_QUEUE), 1):
+                send_time_str = datetime.fromtimestamp(send_time).strftime("%Y-%m-%d %H:%M:%S")
+                response += f"{idx}. 🕒 {send_time_str}\n   📝 {msg_data['preview']}\n\n"
+                
+            await update.message.reply_text(response)
+            
+    except Exception as e:
+        logger.error(f"/check command error: {str(e)}")
+        await update.message.reply_text("❌ Error retrieving schedule")
+
 async def post_init(application: Application) -> None:
     """Initial setup"""
     await application.bot.delete_webhook(drop_pending_updates=True)
+    # Start queue processing task
+    asyncio.create_task(process_queue())
     logger.info("Bot initialized and ready")
 
 def run_bot():
@@ -396,8 +491,9 @@ def run_bot():
         .post_init(post_init) \
         .build()
     
-    # Only handle private messages (not commands)
+    # Add handlers
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("check", check_command))
     
     app.run_polling(
         close_loop=False,
